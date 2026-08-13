@@ -205,6 +205,7 @@ fn is_timeout(error: &tungstenite::Error) -> bool {
 }
 
 fn patch_locale_gate_on_reload(client: &mut CdpClient) -> Result<(), String> {
+    client.call("Network.setCacheDisabled", json!({ "cacheDisabled": true }))?;
     client.call(
         "Fetch.enable",
         json!({
@@ -215,7 +216,7 @@ fn patch_locale_gate_on_reload(client: &mut CdpClient) -> Result<(), String> {
             }]
         }),
     )?;
-    client.call("Page.reload", json!({ "ignoreCache": false }))?;
+    client.call("Page.reload", json!({ "ignoreCache": true }))?;
 
     let deadline = Instant::now() + Duration::from_secs(25);
     let mut inspected_scripts = 0_u32;
