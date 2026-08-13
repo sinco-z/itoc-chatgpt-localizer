@@ -3,6 +3,7 @@ mod windows_app;
 
 #[cfg(windows)]
 fn main() {
+    windows_app::enable_utf8_console();
     if let Err(error) = run() {
         eprintln!("\n错误：{error}");
         eprintln!("请改用官方 ChatGPT 快捷方式启动；本程序不会修改或删除用户数据。");
@@ -20,7 +21,7 @@ fn main() {
 fn run() -> Result<(), String> {
     use std::net::TcpListener;
 
-    println!("ITOC ChatGPT 中文启动器 0.1.1 Preview");
+    println!("ITOC ChatGPT 中文启动器 0.1.2 Preview");
     println!("提示：这是未签名测试版本，不会读取 API Key、账号或历史内容。\n");
 
     let app = windows_app::detect()?;

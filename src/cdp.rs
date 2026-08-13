@@ -71,10 +71,18 @@ fn find_target(port: u16) -> Result<Target, String> {
     let body = http_get_local(port, "/json")?;
     let targets: Vec<Target> =
         serde_json::from_str(&body).map_err(|error| format!("无法解析调试目标：{error}"))?;
-    targets
+    let target = targets
         .into_iter()
         .find(is_chatgpt_target)
-        .ok_or_else(|| "尚未发现 ChatGPT 页面".to_string())
+        .ok_or_else(|| "尚未发现 ChatGPT 页面".to_string())?;
+    validate_websocket_url(
+        target
+            .web_socket_debugger_url
+            .as_deref()
+            .unwrap_or_default(),
+        port,
+    )?;
+    Ok(target)
 }
 
 fn is_chatgpt_target(target: &Target) -> bool {
@@ -383,6 +391,27 @@ fn short_url(url: &str) -> &str {
         .unwrap_or(url)
 }
 
+fn validate_websocket_url(url: &str, expected_port: u16) -> Result<(), String> {
+    let uri = url
+        .parse::<tungstenite::http::Uri>()
+        .map_err(|error| format!("调试页面返回了无效 WebSocket 地址：{error}"))?;
+    if uri.scheme_str() != Some("ws") {
+        return Err("调试 WebSocket 必须使用本机 ws 协议".to_string());
+    }
+    let host = uri
+        .host()
+        .unwrap_or_default()
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    if !matches!(host, "127.0.0.1" | "::1") {
+        return Err("调试 WebSocket 地址不是本机回环地址，已拒绝连接".to_string());
+    }
+    if uri.port_u16() != Some(expected_port) {
+        return Err("调试 WebSocket 端口与启动器选择的端口不一致".to_string());
+    }
+    Ok(())
+}
+
 fn http_get_local(port: u16, path: &str) -> Result<String, String> {
     let address = ("127.0.0.1", port)
         .to_socket_addrs()
@@ -400,22 +429,88 @@ fn http_get_local(port: u16, path: &str) -> Result<String, String> {
     )
     .map_err(|error| format!("请求调试目标失败：{error}"))?;
 
+    const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
     let mut response = Vec::new();
-    stream
-        .read_to_end(&mut response)
-        .map_err(|error| format!("读取调试目标失败：{error}"))?;
-    let response = String::from_utf8(response)
-        .map_err(|error| format!("调试服务返回了非 UTF-8 数据：{error}"))?;
-    let (headers, body) = response
-        .split_once("\r\n\r\n")
-        .ok_or_else(|| "调试服务返回了无效 HTTP 响应".to_string())?;
+    let mut chunk = [0_u8; 8192];
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => {
+                if response.len().saturating_add(read) > MAX_RESPONSE_BYTES {
+                    return Err("调试服务响应超过安全上限".to_string());
+                }
+                response.extend_from_slice(&chunk[..read]);
+                if http_response_complete(&response)? {
+                    break;
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) && !response.is_empty() =>
+            {
+                break;
+            }
+            Err(error) => return Err(format!("读取调试目标失败：{error}")),
+        }
+    }
+    parse_http_response(&response)
+}
+
+fn http_response_complete(response: &[u8]) -> Result<bool, String> {
+    let Some(header_end) = find_header_end(response) else {
+        return Ok(false);
+    };
+    let headers = std::str::from_utf8(&response[..header_end])
+        .map_err(|error| format!("调试服务响应头不是 UTF-8：{error}"))?;
+    let Some(content_length) = content_length(headers)? else {
+        return Ok(false);
+    };
+    Ok(response.len() >= header_end + 4 + content_length)
+}
+
+fn parse_http_response(response: &[u8]) -> Result<String, String> {
+    let header_end =
+        find_header_end(response).ok_or_else(|| "调试服务返回了无效 HTTP 响应".to_string())?;
+    let headers = std::str::from_utf8(&response[..header_end])
+        .map_err(|error| format!("调试服务响应头不是 UTF-8：{error}"))?;
     if !headers.lines().next().unwrap_or_default().contains(" 200 ") {
         return Err(format!(
             "调试服务返回异常状态：{}",
             headers.lines().next().unwrap_or_default()
         ));
     }
-    Ok(body.to_string())
+    let body = &response[header_end + 4..];
+    let body = if let Some(length) = content_length(headers)? {
+        body.get(..length)
+            .ok_or_else(|| "调试服务响应正文不完整".to_string())?
+    } else {
+        body
+    };
+    String::from_utf8(body.to_vec()).map_err(|error| format!("调试服务正文不是 UTF-8：{error}"))
+}
+
+fn find_header_end(response: &[u8]) -> Option<usize> {
+    response.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+fn content_length(headers: &str) -> Result<Option<usize>, String> {
+    headers
+        .lines()
+        .skip(1)
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.trim()
+                .eq_ignore_ascii_case("content-length")
+                .then(|| value.trim())
+        })
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .map_err(|error| format!("调试服务 Content-Length 无效：{error}"))
+        })
+        .transpose()
 }
 
 #[cfg(test)]
@@ -459,5 +554,31 @@ mod tests {
     #[test]
     fn rejects_unknown_locale_gate_shapes() {
         assert!(patch_locale_gate("u=n.get('enable_i18n', false)").is_none());
+    }
+
+    #[test]
+    fn parses_complete_http_body_without_waiting_for_disconnect() {
+        let body = r#"[{"type":"page"}]"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        assert!(http_response_complete(response.as_bytes()).unwrap());
+        assert_eq!(parse_http_response(response.as_bytes()).unwrap(), body);
+    }
+
+    #[test]
+    fn rejects_truncated_http_body() {
+        let response = b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\n{}";
+        assert!(!http_response_complete(response).unwrap());
+        assert!(parse_http_response(response).is_err());
+    }
+
+    #[test]
+    fn accepts_only_the_expected_loopback_websocket() {
+        assert!(validate_websocket_url("ws://127.0.0.1:43123/devtools/page/one", 43123).is_ok());
+        assert!(validate_websocket_url("ws://example.com:43123/devtools/page/one", 43123).is_err());
+        assert!(validate_websocket_url("ws://127.0.0.1:43124/devtools/page/one", 43123).is_err());
     }
 }

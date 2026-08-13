@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.1.1-preview.1";
+  const VERSION = "0.1.2-preview.1";
   const LOCALE = "zh-CN";
 
   if (globalThis.__ITOC_ZH_PREVIEW__?.version === VERSION) {

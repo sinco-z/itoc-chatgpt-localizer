@@ -2,6 +2,17 @@
 use serde::Deserialize;
 
 #[cfg(windows)]
+pub fn enable_utf8_console() {
+    use windows::Win32::System::Console::{SetConsoleCP, SetConsoleOutputCP};
+
+    const UTF8_CODE_PAGE: u32 = 65001;
+    unsafe {
+        let _ = SetConsoleCP(UTF8_CODE_PAGE);
+        let _ = SetConsoleOutputCP(UTF8_CODE_PAGE);
+    }
+}
+
+#[cfg(windows)]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InstalledApp {
