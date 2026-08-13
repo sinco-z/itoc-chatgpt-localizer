@@ -177,6 +177,7 @@ fn inject_target(target: &Target) -> Result<(), String> {
         }),
     )?;
     verify_runtime_marker(&mut client)?;
+    report_locale_setting(&mut client);
     let _ = client.socket.close(None);
     Ok(())
 }
@@ -269,6 +270,52 @@ fn verify_runtime_marker(client: &mut CdpClient) -> Result<(), String> {
     active
         .then_some(())
         .ok_or_else(|| "中文环境脚本没有在页面生效".to_string())
+}
+
+fn report_locale_setting(client: &mut CdpClient) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let expression = r#"JSON.stringify(globalThis.__ITOC_ZH_PREVIEW__ ? {
+        bridgeAvailable: globalThis.__ITOC_ZH_PREVIEW__.bridgeAvailable,
+        settingStatus: globalThis.__ITOC_ZH_PREVIEW__.settingStatus,
+        settingError: globalThis.__ITOC_ZH_PREVIEW__.settingError,
+        patchedClients: globalThis.__ITOC_ZH_PREVIEW__.patchedClients
+    } : null)"#;
+
+    while Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(500));
+        let Ok(result) = client.call(
+            "Runtime.evaluate",
+            json!({ "expression": expression, "returnByValue": true }),
+        ) else {
+            continue;
+        };
+        let Some(serialized) = result.pointer("/result/value").and_then(Value::as_str) else {
+            continue;
+        };
+        let Ok(status) = serde_json::from_str::<Value>(serialized) else {
+            continue;
+        };
+        match status.get("settingStatus").and_then(Value::as_str) {
+            Some("ready") => {
+                println!("已确认应用语言设置：zh-CN。");
+                return;
+            }
+            Some("bridge-unavailable") => {
+                println!("诊断：正式页面未提供设置接口，无法写入应用语言设置。");
+                return;
+            }
+            Some("failed") => {
+                let detail = status
+                    .get("settingError")
+                    .and_then(Value::as_str)
+                    .unwrap_or("未知错误");
+                println!("诊断：写入应用语言设置失败：{detail}");
+                return;
+            }
+            _ => {}
+        }
+    }
+    println!("诊断：等待应用确认语言设置超时。");
 }
 
 fn validate_websocket_url(url: &str, expected_port: u16) -> Result<(), String> {
@@ -449,7 +496,9 @@ mod tests {
 
     #[test]
     fn injection_does_not_touch_credentials_or_provider_state() {
-        assert!(INJECTION_SCRIPT.contains("localeOverride"));
+        assert!(INJECTION_SCRIPT.contains("vscode://codex/${method}"));
+        assert!(INJECTION_SCRIPT.contains("get-setting"));
+        assert!(INJECTION_SCRIPT.contains("set-setting"));
         assert!(!INJECTION_SCRIPT.contains("auth.json"));
         assert!(!INJECTION_SCRIPT.contains("API_KEY"));
         assert!(!INJECTION_SCRIPT.contains("model_provider"));

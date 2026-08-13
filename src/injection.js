@@ -1,9 +1,10 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.1.5-preview.1";
+  const VERSION = "0.1.6-preview.1";
   const LOCALE = "zh-CN";
   const I18N_CONFIG_ID = "72216192";
+  const RELOAD_MARKER = "itoc.zh.locale.reload.v1";
 
   if (globalThis.__ITOC_ZH_PREVIEW__?.version === VERSION) {
     return globalThis.__ITOC_ZH_PREVIEW__;
@@ -13,6 +14,9 @@
     version: VERSION,
     locale: LOCALE,
     patchedClients: 0,
+    bridgeAvailable: false,
+    settingStatus: "pending",
+    settingError: null,
     installedAt: new Date().toISOString(),
   };
   globalThis.__ITOC_ZH_PREVIEW__ = state;
@@ -31,8 +35,95 @@
 
   try {
     document.documentElement?.setAttribute("lang", LOCALE);
-    localStorage.setItem("localeOverride", LOCALE);
   } catch (_) {}
+
+  const waitForBridge = () =>
+    new Promise((resolve) => {
+      const startedAt = Date.now();
+      const timer = setInterval(() => {
+        const bridge = globalThis.electronBridge;
+        if (bridge && typeof bridge.sendMessageFromView === "function") {
+          clearInterval(timer);
+          resolve(bridge);
+        } else if (Date.now() - startedAt >= 8000) {
+          clearInterval(timer);
+          resolve(null);
+        }
+      }, 50);
+    });
+
+  const callSettingApi = (bridge, method, params) =>
+    new Promise((resolve, reject) => {
+      const requestId = `itoc-locale-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      let timeout;
+      const cleanup = () => {
+        clearTimeout(timeout);
+        removeEventListener("message", onMessage);
+      };
+      const onMessage = (event) => {
+        const message = event?.data;
+        if (message?.type !== "fetch-response" || message.requestId !== requestId) return;
+        cleanup();
+        if (message.responseType !== "success") {
+          reject(new Error(message.error || `${method} failed`));
+          return;
+        }
+        try {
+          resolve(JSON.parse(message.bodyJsonString || "null"));
+        } catch (error) {
+          reject(error);
+        }
+      };
+      addEventListener("message", onMessage);
+      timeout = setTimeout(() => {
+        cleanup();
+        reject(new Error(`${method} timed out`));
+      }, 6000);
+      Promise.resolve(
+        bridge.sendMessageFromView({
+          type: "fetch",
+          requestId,
+          method: "POST",
+          url: `vscode://codex/${method}`,
+          body: JSON.stringify({ params }),
+        }),
+      ).catch((error) => {
+        cleanup();
+        reject(error);
+      });
+    });
+
+  const syncOfficialLocale = async () => {
+    const bridge = await waitForBridge();
+    state.bridgeAvailable = Boolean(bridge);
+    if (!bridge) {
+      state.settingStatus = "bridge-unavailable";
+      return;
+    }
+    try {
+      const current = await callSettingApi(bridge, "get-setting", { key: "localeOverride" });
+      if (current?.value === LOCALE) {
+        state.settingStatus = "ready";
+        try {
+          sessionStorage.removeItem(RELOAD_MARKER);
+        } catch (_) {}
+        return;
+      }
+      await callSettingApi(bridge, "set-setting", { key: "localeOverride", value: LOCALE });
+      state.settingStatus = "updated";
+      let shouldReload = true;
+      try {
+        shouldReload = sessionStorage.getItem(RELOAD_MARKER) !== LOCALE;
+        sessionStorage.setItem(RELOAD_MARKER, LOCALE);
+      } catch (_) {}
+      if (shouldReload) setTimeout(() => location.reload(), 100);
+    } catch (error) {
+      state.settingStatus = "failed";
+      state.settingError = String(error?.message || error);
+    }
+  };
+
+  syncOfficialLocale();
 
   const enableI18n = (config) => {
     if (!config || typeof config !== "object") return config;
