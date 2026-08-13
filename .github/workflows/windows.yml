@@ -1,0 +1,53 @@
+name: Windows preview
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test-and-build:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build release executable
+        run: cargo build --release --locked
+
+      - name: Prepare artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          Copy-Item target/release/itoc-chatgpt-zh.exe dist/itoc-chatgpt-zh-windows-x64.exe
+          $hash = (Get-FileHash dist/itoc-chatgpt-zh-windows-x64.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  itoc-chatgpt-zh-windows-x64.exe" | Set-Content -Encoding ascii dist/SHA256SUMS.txt
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: itoc-chatgpt-zh-windows-x64
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Upload release assets
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          prerelease: true
+          generate_release_notes: true
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
