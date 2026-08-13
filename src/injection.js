@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.1.4-preview.1";
+  const VERSION = "0.1.5-preview.1";
   const LOCALE = "zh-CN";
   const I18N_CONFIG_ID = "72216192";
 

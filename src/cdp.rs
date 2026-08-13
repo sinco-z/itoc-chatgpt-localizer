@@ -73,7 +73,8 @@ fn find_target(port: u16) -> Result<Target, String> {
         serde_json::from_str(&body).map_err(|error| format!("无法解析调试目标：{error}"))?;
     let target = targets
         .into_iter()
-        .find(is_chatgpt_target)
+        .filter(is_chatgpt_target)
+        .max_by_key(target_priority)
         .ok_or_else(|| "尚未发现 ChatGPT 页面".to_string())?;
     validate_websocket_url(
         target
@@ -83,6 +84,18 @@ fn find_target(port: u16) -> Result<Target, String> {
         port,
     )?;
     Ok(target)
+}
+
+fn target_priority(target: &Target) -> u8 {
+    if is_primary_app_page(&target.url) {
+        3
+    } else if is_official_chatgpt_page(&target.title, &target.url) {
+        2
+    } else if is_chatgpt_bootstrap_page(&target.title, &target.url) {
+        1
+    } else {
+        0
+    }
 }
 
 fn is_chatgpt_target(target: &Target) -> bool {
@@ -411,6 +424,7 @@ mod tests {
             web_socket_debugger_url: Some("ws://127.0.0.1:1234/devtools/page/a".to_string()),
         };
         assert!(is_chatgpt_target(&stable));
+        assert_eq!(target_priority(&stable), 3);
 
         let placeholder = Target {
             title: "ChatGPT".to_string(),
@@ -418,6 +432,7 @@ mod tests {
             ..stable.clone()
         };
         assert!(is_chatgpt_target(&placeholder));
+        assert_eq!(target_priority(&placeholder), 1);
 
         let unrelated_placeholder = Target {
             title: "Example".to_string(),
