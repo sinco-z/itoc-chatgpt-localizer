@@ -1,12 +1,7 @@
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine;
-use regex::Regex;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
-use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 use tungstenite::stream::MaybeTlsStream;
@@ -39,9 +34,13 @@ pub fn wait_and_inject(port: u16) -> Result<(), String> {
         }
     };
     eprintln!();
-    println!("已选择稳定页面：{} ({})", first.title, first.url);
-    inject_target(&first, true)?;
-    println!("中文 Preview 已注入。这个窗口可以最小化；关闭 ChatGPT 后会自动退出。");
+    println!(
+        "已连接页面：{} ({})",
+        first.title,
+        display_target_url(&first.url)
+    );
+    inject_target(&first)?;
+    println!("中文脚本已注册。这个窗口可以最小化；关闭 ChatGPT 后会自动退出。");
 
     let mut active_url = first.web_socket_debugger_url.unwrap_or_default();
     let mut misses = 0_u8;
@@ -52,7 +51,7 @@ pub fn wait_and_inject(port: u16) -> Result<(), String> {
                 misses = 0;
                 let next_url = target.web_socket_debugger_url.clone().unwrap_or_default();
                 if !next_url.is_empty() && next_url != active_url {
-                    inject_target(&target, true)?;
+                    inject_target(&target)?;
                     active_url = next_url;
                     println!("检测到 ChatGPT 页面重建，已重新注入中文 Preview。");
                 }
@@ -95,7 +94,9 @@ fn is_chatgpt_target(target: &Target) -> bool {
     {
         return false;
     }
-    is_primary_app_page(&target.url) || is_official_chatgpt_page(&target.title, &target.url)
+    is_primary_app_page(&target.url)
+        || is_official_chatgpt_page(&target.title, &target.url)
+        || is_chatgpt_bootstrap_page(&target.title, &target.url)
 }
 
 fn is_primary_app_page(url: &str) -> bool {
@@ -119,7 +120,27 @@ fn is_official_chatgpt_page(title: &str, url: &str) -> bool {
             || url.starts_with("https://chat.openai.com/"))
 }
 
-fn inject_target(target: &Target, reload: bool) -> Result<(), String> {
+fn is_chatgpt_bootstrap_page(title: &str, url: &str) -> bool {
+    title.trim().eq_ignore_ascii_case("chatgpt")
+        && url
+            .trim()
+            .to_ascii_lowercase()
+            .starts_with("data:text/html")
+}
+
+fn display_target_url(url: &str) -> &str {
+    if url
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with("data:text/html")
+    {
+        "data:text/html（启动占位页）"
+    } else {
+        url
+    }
+}
+
+fn inject_target(target: &Target) -> Result<(), String> {
     let websocket_url = target
         .web_socket_debugger_url
         .as_deref()
@@ -134,11 +155,15 @@ fn inject_target(target: &Target, reload: bool) -> Result<(), String> {
         json!({ "source": INJECTION_SCRIPT }),
     )?;
 
-    if reload {
-        patch_locale_gate_on_reload(&mut client)?;
-    } else {
-        verify_runtime_marker(&mut client)?;
-    }
+    client.call(
+        "Runtime.evaluate",
+        json!({
+            "expression": INJECTION_SCRIPT,
+            "returnByValue": true,
+            "allowUnsafeEvalBlockedByCSP": true
+        }),
+    )?;
+    verify_runtime_marker(&mut client)?;
     let _ = client.socket.close(None);
     Ok(())
 }
@@ -148,7 +173,6 @@ type CdpSocket = WebSocket<MaybeTlsStream<TcpStream>>;
 struct CdpClient {
     socket: CdpSocket,
     next_id: u64,
-    events: VecDeque<Value>,
 }
 
 impl CdpClient {
@@ -158,11 +182,7 @@ impl CdpClient {
                 .set_read_timeout(Some(Duration::from_millis(750)))
                 .map_err(|error| format!("设置调试连接超时失败：{error}"))?;
         }
-        Ok(Self {
-            socket,
-            next_id: 1,
-            events: VecDeque::new(),
-        })
+        Ok(Self { socket, next_id: 1 })
     }
 
     fn call(&mut self, method: &str, params: Value) -> Result<Value, String> {
@@ -182,7 +202,6 @@ impl CdpClient {
                     }
                     return Ok(response.get("result").cloned().unwrap_or(Value::Null));
                 }
-                Ok(event) if event.get("method").is_some() => self.events.push_back(event),
                 Ok(_) => {}
                 Err(error) if is_timeout(error.as_ref()) && Instant::now() < deadline => {}
                 Err(error) => return Err(format!("读取 CDP 命令 {method} 结果失败：{error}")),
@@ -191,21 +210,6 @@ impl CdpClient {
                 return Err(format!("等待 CDP 命令 {method} 结果超时"));
             }
         }
-    }
-
-    fn next_event(&mut self, deadline: Instant) -> Result<Option<Value>, String> {
-        if let Some(event) = self.events.pop_front() {
-            return Ok(Some(event));
-        }
-        while Instant::now() < deadline {
-            match self.read_value() {
-                Ok(event) if event.get("method").is_some() => return Ok(Some(event)),
-                Ok(_) => {}
-                Err(error) if is_timeout(error.as_ref()) => {}
-                Err(error) => return Err(format!("读取 CDP 事件失败：{error}")),
-            }
-        }
-        Ok(None)
     }
 
     fn read_value(&mut self) -> Result<Value, Box<tungstenite::Error>> {
@@ -234,158 +238,6 @@ fn is_timeout(error: &tungstenite::Error) -> bool {
     )
 }
 
-fn patch_locale_gate_on_reload(client: &mut CdpClient) -> Result<(), String> {
-    client.call("Network.setCacheDisabled", json!({ "cacheDisabled": true }))?;
-    client.call(
-        "Fetch.enable",
-        json!({
-            "patterns": [{
-                "urlPattern": "*",
-                "resourceType": "Script",
-                "requestStage": "Response"
-            }]
-        }),
-    )?;
-    client.call("Page.reload", json!({ "ignoreCache": true }))?;
-
-    let deadline = Instant::now() + Duration::from_secs(25);
-    let mut inspected_scripts = 0_u32;
-    let mut saw_i18n_source = false;
-    let mut patched_url = None;
-
-    while Instant::now() < deadline && patched_url.is_none() {
-        let Some(event) = client.next_event(deadline)? else {
-            break;
-        };
-        if event.get("method").and_then(Value::as_str) != Some("Fetch.requestPaused") {
-            continue;
-        }
-        let outcome = handle_paused_script(client, &event)?;
-        inspected_scripts += 1;
-        saw_i18n_source |= outcome.saw_i18n_source;
-        patched_url = outcome.patched_url;
-    }
-
-    client.call("Fetch.disable", json!({}))?;
-    let Some(url) = patched_url else {
-        let detail = if saw_i18n_source {
-            "发现 enable_i18n，但当前官方版本的代码形态已变化"
-        } else {
-            "没有在已加载的前端脚本中发现 enable_i18n"
-        };
-        return Err(format!(
-            "中文门控未修改：{detail}（检查了 {inspected_scripts} 个脚本）。请改用官方快捷方式并反馈应用版本。"
-        ));
-    };
-
-    verify_runtime_marker(client)?;
-    println!("已在内存中启用中文门控：{}", short_url(&url));
-    Ok(())
-}
-
-#[derive(Default)]
-struct PatchOutcome {
-    saw_i18n_source: bool,
-    patched_url: Option<String>,
-}
-
-fn handle_paused_script(client: &mut CdpClient, event: &Value) -> Result<PatchOutcome, String> {
-    let params = event
-        .get("params")
-        .ok_or_else(|| "Fetch.requestPaused 缺少参数".to_string())?;
-    let request_id = params
-        .get("requestId")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "Fetch.requestPaused 缺少 requestId".to_string())?;
-    let url = params
-        .pointer("/request/url")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-
-    if params.get("responseStatusCode").is_none() {
-        client.call("Fetch.continueRequest", json!({ "requestId": request_id }))?;
-        return Ok(PatchOutcome::default());
-    }
-
-    let response = client.call("Fetch.getResponseBody", json!({ "requestId": request_id }))?;
-    let encoded = response
-        .get("body")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "Fetch.getResponseBody 缺少 body".to_string())?;
-    let body = if response
-        .get("base64Encoded")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        BASE64
-            .decode(encoded)
-            .map_err(|error| format!("解析脚本响应失败：{error}"))?
-    } else {
-        encoded.as_bytes().to_vec()
-    };
-    let Ok(source) = String::from_utf8(body) else {
-        client.call("Fetch.continueRequest", json!({ "requestId": request_id }))?;
-        return Ok(PatchOutcome::default());
-    };
-
-    let saw_i18n_source = source.contains("enable_i18n");
-    let Some(patched) = patch_locale_gate(&source) else {
-        client.call("Fetch.continueRequest", json!({ "requestId": request_id }))?;
-        return Ok(PatchOutcome {
-            saw_i18n_source,
-            patched_url: None,
-        });
-    };
-
-    let status = params
-        .get("responseStatusCode")
-        .and_then(Value::as_u64)
-        .unwrap_or(200);
-    let headers = params
-        .get("responseHeaders")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|header| {
-            let name = header
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            !matches!(
-                name.to_ascii_lowercase().as_str(),
-                "content-encoding" | "content-length" | "transfer-encoding" | "content-md5"
-            )
-        })
-        .collect::<Vec<_>>();
-    client.call(
-        "Fetch.fulfillRequest",
-        json!({
-            "requestId": request_id,
-            "responseCode": status,
-            "responseHeaders": headers,
-            "body": BASE64.encode(patched.as_bytes())
-        }),
-    )?;
-    Ok(PatchOutcome {
-        saw_i18n_source: true,
-        patched_url: Some(url),
-    })
-}
-
-fn patch_locale_gate(source: &str) -> Option<String> {
-    static GATE: OnceLock<Regex> = OnceLock::new();
-    let gate = GATE.get_or_init(|| {
-        Regex::new(
-            r"([A-Za-z_$][A-Za-z0-9_$]*=)[A-Za-z_$][A-Za-z0-9_$]*\?\.get\(`enable_i18n`,!1\)",
-        )
-        .expect("locale gate regex must compile")
-    });
-    let patched = gate.replace(source, "${1}!0");
-    (patched.as_ref() != source).then(|| patched.into_owned())
-}
-
 fn verify_runtime_marker(client: &mut CdpClient) -> Result<(), String> {
     let result = client.call(
         "Runtime.evaluate",
@@ -403,14 +255,7 @@ fn verify_runtime_marker(client: &mut CdpClient) -> Result<(), String> {
         .unwrap_or(false);
     active
         .then_some(())
-        .ok_or_else(|| "中文环境脚本没有在重载后的页面生效".to_string())
-}
-
-fn short_url(url: &str) -> &str {
-    url.rsplit('/')
-        .next()
-        .filter(|value| !value.is_empty())
-        .unwrap_or(url)
+        .ok_or_else(|| "中文环境脚本没有在页面生效".to_string())
 }
 
 fn validate_websocket_url(url: &str, expected_port: u16) -> Result<(), String> {
@@ -558,7 +403,7 @@ mod tests {
     }
 
     #[test]
-    fn selects_stable_app_page_but_rejects_transient_pages() {
+    fn selects_stable_app_and_chatgpt_bootstrap_pages() {
         let stable = Target {
             target_type: "page".to_string(),
             title: "Codex".to_string(),
@@ -572,7 +417,13 @@ mod tests {
             url: "data:text/html;charset=utf-8,loading".to_string(),
             ..stable.clone()
         };
-        assert!(!is_chatgpt_target(&placeholder));
+        assert!(is_chatgpt_target(&placeholder));
+
+        let unrelated_placeholder = Target {
+            title: "Example".to_string(),
+            ..placeholder
+        };
+        assert!(!is_chatgpt_target(&unrelated_placeholder));
 
         let quick_chat = Target {
             url: "app://-/index.html?initialRoute=%2Fchatgpt%2Fquick-chat-prewarm".to_string(),
@@ -590,16 +441,12 @@ mod tests {
     }
 
     #[test]
-    fn patches_the_current_minified_locale_gate_once() {
-        let source = "const a=1;u=n?.get(`enable_i18n`,!1),v=2;";
-        let patched = patch_locale_gate(source).expect("current gate should match");
-        assert_eq!(patched, "const a=1;u=!0,v=2;");
-        assert!(patch_locale_gate(&patched).is_none());
-    }
-
-    #[test]
-    fn rejects_unknown_locale_gate_shapes() {
-        assert!(patch_locale_gate("u=n.get('enable_i18n', false)").is_none());
+    fn injection_uses_early_runtime_hooks_without_network_interception() {
+        assert!(INJECTION_SCRIPT.contains("__STATSIG__"));
+        assert!(INJECTION_SCRIPT.contains("getDynamicConfig"));
+        assert!(INJECTION_SCRIPT.contains("enable_i18n"));
+        assert!(!INJECTION_SCRIPT.contains("Fetch.enable"));
+        assert!(!INJECTION_SCRIPT.contains("Fetch.fulfillRequest"));
     }
 
     #[test]

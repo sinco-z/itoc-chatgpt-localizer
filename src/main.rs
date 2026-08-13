@@ -21,7 +21,7 @@ fn main() {
 fn run() -> Result<(), String> {
     use std::net::TcpListener;
 
-    println!("ITOC ChatGPT 中文启动器 0.1.3 Preview");
+    println!("ITOC ChatGPT 中文启动器 0.1.4 Preview");
     println!("提示：这是未签名测试版本，不会读取 API Key、账号或历史内容。\n");
 
     let app = windows_app::detect()?;
