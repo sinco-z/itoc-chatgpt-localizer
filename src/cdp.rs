@@ -39,6 +39,7 @@ pub fn wait_and_inject(port: u16) -> Result<(), String> {
         }
     };
     eprintln!();
+    println!("已选择稳定页面：{} ({})", first.title, first.url);
     inject_target(&first, true)?;
     println!("中文 Preview 已注入。这个窗口可以最小化；关闭 ChatGPT 后会自动退出。");
 
@@ -86,15 +87,36 @@ fn find_target(port: u16) -> Result<Target, String> {
 }
 
 fn is_chatgpt_target(target: &Target) -> bool {
-    if target.target_type != "page" || target.web_socket_debugger_url.is_none() {
+    if target.target_type != "page"
+        || target
+            .web_socket_debugger_url
+            .as_deref()
+            .is_none_or(str::is_empty)
+    {
         return false;
     }
-    let identity = format!("{} {}", target.title, target.url).to_ascii_lowercase();
-    identity.contains("codex")
-        || identity.contains("chatgpt")
-        || target.url.starts_with("https://chatgpt.com/")
-        || target.url.starts_with("https://chat.openai.com/")
-        || target.url.starts_with("data:text/html")
+    is_primary_app_page(&target.url) || is_official_chatgpt_page(&target.title, &target.url)
+}
+
+fn is_primary_app_page(url: &str) -> bool {
+    let normalized = url.trim().to_ascii_lowercase();
+    if !normalized.starts_with("app://-/index.html") {
+        return false;
+    }
+    !normalized.contains("initialroute=%2favatar-overlay")
+        && !normalized.contains("initialroute=/avatar-overlay")
+        && !normalized.contains("initialroute=%2fchatgpt%2fquick-chat")
+        && !normalized.contains("initialroute=/chatgpt/quick-chat")
+}
+
+fn is_official_chatgpt_page(title: &str, url: &str) -> bool {
+    let title = title.trim().to_ascii_lowercase();
+    let url = url.trim().to_ascii_lowercase();
+    title == "chatgpt"
+        && (url == "https://chatgpt.com"
+            || url.starts_with("https://chatgpt.com/")
+            || url == "https://chat.openai.com"
+            || url.starts_with("https://chat.openai.com/"))
 }
 
 fn inject_target(target: &Target, reload: bool) -> Result<(), String> {
@@ -533,6 +555,30 @@ mod tests {
             ..target
         };
         assert!(!is_chatgpt_target(&unrelated));
+    }
+
+    #[test]
+    fn selects_stable_app_page_but_rejects_transient_pages() {
+        let stable = Target {
+            target_type: "page".to_string(),
+            title: "Codex".to_string(),
+            url: "app://-/index.html".to_string(),
+            web_socket_debugger_url: Some("ws://127.0.0.1:1234/devtools/page/a".to_string()),
+        };
+        assert!(is_chatgpt_target(&stable));
+
+        let placeholder = Target {
+            title: "ChatGPT".to_string(),
+            url: "data:text/html;charset=utf-8,loading".to_string(),
+            ..stable.clone()
+        };
+        assert!(!is_chatgpt_target(&placeholder));
+
+        let quick_chat = Target {
+            url: "app://-/index.html?initialRoute=%2Fchatgpt%2Fquick-chat-prewarm".to_string(),
+            ..stable
+        };
+        assert!(!is_chatgpt_target(&quick_chat));
     }
 
     #[test]
