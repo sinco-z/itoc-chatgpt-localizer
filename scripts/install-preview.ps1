@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Version = 'v0.1.0-preview.1',
+    [string]$Version = 'v0.1.1-preview.1',
     [switch]$AcceptUnsignedPreview
 )
 

@@ -1,6 +1,6 @@
 [package]
 name = "itoc-chatgpt-localizer"
-version = "0.1.0-preview.1"
+version = "0.1.1-preview.1"
 edition = "2021"
 license = "MIT"
 description = "Experimental Chinese locale launcher for the official ChatGPT Windows app"
@@ -11,6 +11,8 @@ name = "itoc-chatgpt-zh"
 path = "src/main.rs"
 
 [dependencies]
+base64 = "0.22"
+regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tungstenite = { version = "0.27", default-features = false, features = ["handshake"] }
@@ -25,4 +27,3 @@ windows = { version = "0.61", features = [
 lto = "thin"
 codegen-units = 1
 strip = true
-

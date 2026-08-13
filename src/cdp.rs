@@ -1,10 +1,16 @@
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
+use regex::Regex;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
+use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
-use tungstenite::{connect, Message};
+use tungstenite::stream::MaybeTlsStream;
+use tungstenite::{connect, Message, WebSocket};
 
 const INJECTION_SCRIPT: &str = include_str!("injection.js");
 
@@ -88,69 +94,292 @@ fn inject_target(target: &Target, reload: bool) -> Result<(), String> {
         .web_socket_debugger_url
         .as_deref()
         .ok_or_else(|| "调试目标没有 WebSocket 地址".to_string())?;
-    let (mut socket, _) =
+    let (socket, _) =
         connect(websocket_url).map_err(|error| format!("连接本机调试页面失败：{error}"))?;
+    let mut client = CdpClient::new(socket)?;
 
-    cdp_call(&mut socket, 1, "Page.enable", json!({}))?;
-    cdp_call(
-        &mut socket,
-        2,
+    client.call("Page.enable", json!({}))?;
+    client.call(
         "Page.addScriptToEvaluateOnNewDocument",
         json!({ "source": INJECTION_SCRIPT }),
     )?;
-    cdp_call(
-        &mut socket,
-        3,
-        "Runtime.evaluate",
-        json!({
-            "expression": INJECTION_SCRIPT,
-            "returnByValue": true,
-            "awaitPromise": true
-        }),
-    )?;
 
     if reload {
-        let request = json!({
-            "id": 4,
-            "method": "Page.reload",
-            "params": { "ignoreCache": false }
-        });
-        socket
-            .send(Message::Text(request.to_string().into()))
-            .map_err(|error| format!("请求 ChatGPT 刷新失败：{error}"))?;
+        patch_locale_gate_on_reload(&mut client)?;
+    } else {
+        verify_runtime_marker(&mut client)?;
     }
-    let _ = socket.close(None);
+    let _ = client.socket.close(None);
     Ok(())
 }
 
-fn cdp_call(
-    socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>>,
-    id: u64,
-    method: &str,
-    params: Value,
-) -> Result<Value, String> {
-    let request = json!({ "id": id, "method": method, "params": params });
-    socket
-        .send(Message::Text(request.to_string().into()))
-        .map_err(|error| format!("发送 CDP 命令 {method} 失败：{error}"))?;
+type CdpSocket = WebSocket<MaybeTlsStream<TcpStream>>;
 
-    loop {
-        let message = socket
-            .read()
-            .map_err(|error| format!("读取 CDP 命令 {method} 结果失败：{error}"))?;
-        let Message::Text(text) = message else {
-            continue;
-        };
-        let response: Value = serde_json::from_str(text.as_ref())
-            .map_err(|error| format!("CDP 返回了无效 JSON：{error}"))?;
-        if response.get("id").and_then(Value::as_u64) != Some(id) {
-            continue;
+struct CdpClient {
+    socket: CdpSocket,
+    next_id: u64,
+    events: VecDeque<Value>,
+}
+
+impl CdpClient {
+    fn new(mut socket: CdpSocket) -> Result<Self, String> {
+        if let MaybeTlsStream::Plain(stream) = socket.get_mut() {
+            stream
+                .set_read_timeout(Some(Duration::from_millis(750)))
+                .map_err(|error| format!("设置调试连接超时失败：{error}"))?;
         }
-        if let Some(error) = response.get("error") {
-            return Err(format!("CDP 命令 {method} 被拒绝：{error}"));
-        }
-        return Ok(response.get("result").cloned().unwrap_or(Value::Null));
+        Ok(Self {
+            socket,
+            next_id: 1,
+            events: VecDeque::new(),
+        })
     }
+
+    fn call(&mut self, method: &str, params: Value) -> Result<Value, String> {
+        let id = self.next_id;
+        self.next_id += 1;
+        let request = json!({ "id": id, "method": method, "params": params });
+        self.socket
+            .send(Message::Text(request.to_string().into()))
+            .map_err(|error| format!("发送 CDP 命令 {method} 失败：{error}"))?;
+
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            match self.read_value() {
+                Ok(response) if response.get("id").and_then(Value::as_u64) == Some(id) => {
+                    if let Some(error) = response.get("error") {
+                        return Err(format!("CDP 命令 {method} 被拒绝：{error}"));
+                    }
+                    return Ok(response.get("result").cloned().unwrap_or(Value::Null));
+                }
+                Ok(event) if event.get("method").is_some() => self.events.push_back(event),
+                Ok(_) => {}
+                Err(error) if is_timeout(error.as_ref()) && Instant::now() < deadline => {}
+                Err(error) => return Err(format!("读取 CDP 命令 {method} 结果失败：{error}")),
+            }
+            if Instant::now() >= deadline {
+                return Err(format!("等待 CDP 命令 {method} 结果超时"));
+            }
+        }
+    }
+
+    fn next_event(&mut self, deadline: Instant) -> Result<Option<Value>, String> {
+        if let Some(event) = self.events.pop_front() {
+            return Ok(Some(event));
+        }
+        while Instant::now() < deadline {
+            match self.read_value() {
+                Ok(event) if event.get("method").is_some() => return Ok(Some(event)),
+                Ok(_) => {}
+                Err(error) if is_timeout(error.as_ref()) => {}
+                Err(error) => return Err(format!("读取 CDP 事件失败：{error}")),
+            }
+        }
+        Ok(None)
+    }
+
+    fn read_value(&mut self) -> Result<Value, Box<tungstenite::Error>> {
+        loop {
+            let message = self.socket.read().map_err(Box::new)?;
+            if let Message::Text(text) = message {
+                return serde_json::from_str(text.as_ref()).map_err(|error| {
+                    Box::new(tungstenite::Error::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        error,
+                    )))
+                });
+            }
+        }
+    }
+}
+
+fn is_timeout(error: &tungstenite::Error) -> bool {
+    matches!(
+        error,
+        tungstenite::Error::Io(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            )
+    )
+}
+
+fn patch_locale_gate_on_reload(client: &mut CdpClient) -> Result<(), String> {
+    client.call(
+        "Fetch.enable",
+        json!({
+            "patterns": [{
+                "urlPattern": "*",
+                "resourceType": "Script",
+                "requestStage": "Response"
+            }]
+        }),
+    )?;
+    client.call("Page.reload", json!({ "ignoreCache": false }))?;
+
+    let deadline = Instant::now() + Duration::from_secs(25);
+    let mut inspected_scripts = 0_u32;
+    let mut saw_i18n_source = false;
+    let mut patched_url = None;
+
+    while Instant::now() < deadline && patched_url.is_none() {
+        let Some(event) = client.next_event(deadline)? else {
+            break;
+        };
+        if event.get("method").and_then(Value::as_str) != Some("Fetch.requestPaused") {
+            continue;
+        }
+        let outcome = handle_paused_script(client, &event)?;
+        inspected_scripts += 1;
+        saw_i18n_source |= outcome.saw_i18n_source;
+        patched_url = outcome.patched_url;
+    }
+
+    client.call("Fetch.disable", json!({}))?;
+    let Some(url) = patched_url else {
+        let detail = if saw_i18n_source {
+            "发现 enable_i18n，但当前官方版本的代码形态已变化"
+        } else {
+            "没有在已加载的前端脚本中发现 enable_i18n"
+        };
+        return Err(format!(
+            "中文门控未修改：{detail}（检查了 {inspected_scripts} 个脚本）。请改用官方快捷方式并反馈应用版本。"
+        ));
+    };
+
+    verify_runtime_marker(client)?;
+    println!("已在内存中启用中文门控：{}", short_url(&url));
+    Ok(())
+}
+
+#[derive(Default)]
+struct PatchOutcome {
+    saw_i18n_source: bool,
+    patched_url: Option<String>,
+}
+
+fn handle_paused_script(client: &mut CdpClient, event: &Value) -> Result<PatchOutcome, String> {
+    let params = event
+        .get("params")
+        .ok_or_else(|| "Fetch.requestPaused 缺少参数".to_string())?;
+    let request_id = params
+        .get("requestId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Fetch.requestPaused 缺少 requestId".to_string())?;
+    let url = params
+        .pointer("/request/url")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+
+    if params.get("responseStatusCode").is_none() {
+        client.call("Fetch.continueRequest", json!({ "requestId": request_id }))?;
+        return Ok(PatchOutcome::default());
+    }
+
+    let response = client.call("Fetch.getResponseBody", json!({ "requestId": request_id }))?;
+    let encoded = response
+        .get("body")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Fetch.getResponseBody 缺少 body".to_string())?;
+    let body = if response
+        .get("base64Encoded")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        BASE64
+            .decode(encoded)
+            .map_err(|error| format!("解析脚本响应失败：{error}"))?
+    } else {
+        encoded.as_bytes().to_vec()
+    };
+    let Ok(source) = String::from_utf8(body) else {
+        client.call("Fetch.continueRequest", json!({ "requestId": request_id }))?;
+        return Ok(PatchOutcome::default());
+    };
+
+    let saw_i18n_source = source.contains("enable_i18n");
+    let Some(patched) = patch_locale_gate(&source) else {
+        client.call("Fetch.continueRequest", json!({ "requestId": request_id }))?;
+        return Ok(PatchOutcome {
+            saw_i18n_source,
+            patched_url: None,
+        });
+    };
+
+    let status = params
+        .get("responseStatusCode")
+        .and_then(Value::as_u64)
+        .unwrap_or(200);
+    let headers = params
+        .get("responseHeaders")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|header| {
+            let name = header
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            !matches!(
+                name.to_ascii_lowercase().as_str(),
+                "content-encoding" | "content-length" | "transfer-encoding" | "content-md5"
+            )
+        })
+        .collect::<Vec<_>>();
+    client.call(
+        "Fetch.fulfillRequest",
+        json!({
+            "requestId": request_id,
+            "responseCode": status,
+            "responseHeaders": headers,
+            "body": BASE64.encode(patched.as_bytes())
+        }),
+    )?;
+    Ok(PatchOutcome {
+        saw_i18n_source: true,
+        patched_url: Some(url),
+    })
+}
+
+fn patch_locale_gate(source: &str) -> Option<String> {
+    static GATE: OnceLock<Regex> = OnceLock::new();
+    let gate = GATE.get_or_init(|| {
+        Regex::new(
+            r"([A-Za-z_$][A-Za-z0-9_$]*=)[A-Za-z_$][A-Za-z0-9_$]*\?\.get\(`enable_i18n`,!1\)",
+        )
+        .expect("locale gate regex must compile")
+    });
+    let patched = gate.replace(source, "${1}!0");
+    (patched.as_ref() != source).then(|| patched.into_owned())
+}
+
+fn verify_runtime_marker(client: &mut CdpClient) -> Result<(), String> {
+    let result = client.call(
+        "Runtime.evaluate",
+        json!({
+            "expression": "Boolean(globalThis.__ITOC_ZH_PREVIEW__?.locale === 'zh-CN')",
+            "returnByValue": true
+        }),
+    )?;
+    if result.get("exceptionDetails").is_some() {
+        return Err("中文环境脚本执行异常".to_string());
+    }
+    let active = result
+        .pointer("/result/value")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    active
+        .then_some(())
+        .ok_or_else(|| "中文环境脚本没有在重载后的页面生效".to_string())
+}
+
+fn short_url(url: &str) -> &str {
+    url.rsplit('/')
+        .next()
+        .filter(|value| !value.is_empty())
+        .unwrap_or(url)
 }
 
 fn http_get_local(port: u16, path: &str) -> Result<String, String> {
@@ -211,10 +440,23 @@ mod tests {
     }
 
     #[test]
-    fn injection_keeps_the_feature_flag_isolated() {
-        assert!(INJECTION_SCRIPT.contains("72216192"));
-        assert!(INJECTION_SCRIPT.contains("enable_i18n"));
+    fn injection_does_not_touch_credentials_or_provider_state() {
+        assert!(INJECTION_SCRIPT.contains("localeOverride"));
         assert!(!INJECTION_SCRIPT.contains("auth.json"));
         assert!(!INJECTION_SCRIPT.contains("API_KEY"));
+        assert!(!INJECTION_SCRIPT.contains("model_provider"));
+    }
+
+    #[test]
+    fn patches_the_current_minified_locale_gate_once() {
+        let source = "const a=1;u=n?.get(`enable_i18n`,!1),v=2;";
+        let patched = patch_locale_gate(source).expect("current gate should match");
+        assert_eq!(patched, "const a=1;u=!0,v=2;");
+        assert!(patch_locale_gate(&patched).is_none());
+    }
+
+    #[test]
+    fn rejects_unknown_locale_gate_shapes() {
+        assert!(patch_locale_gate("u=n.get('enable_i18n', false)").is_none());
     }
 }
