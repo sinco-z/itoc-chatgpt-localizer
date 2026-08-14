@@ -1,6 +1,6 @@
 ﻿[CmdletBinding()]
 param(
-    [string]$Version = 'v0.1.8-preview.1'
+    [string]$Version = 'v0.1.8-preview.2'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -87,14 +87,30 @@ $desktop = Join-Path ([Environment]::GetFolderPath('Desktop')) 'ChatGPT 中文�
 $startMenu = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\ITOC\ChatGPT 中文版.lnk'
 $legacyDesktop = Join-Path ([Environment]::GetFolderPath('Desktop')) 'ITOC ChatGPT 中文 Preview.lnk'
 $legacyStartMenu = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\ITOC\ChatGPT 中文 Preview.lnk'
-Remove-Item -LiteralPath $desktop, $startMenu, $legacyDesktop, $legacyStartMenu -Force -ErrorAction SilentlyContinue
+$uninstallShortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\ITOC\卸载 ChatGPT 中文版.lnk'
+if (Get-Process -Name 'itoc-chatgpt-zh' -ErrorAction SilentlyContinue) {
+    Write-Warning '请先从任务栏托盘完全退出 ChatGPT，再运行卸载。'
+    Read-Host '按 Enter 关闭窗口'
+    exit 1
+}
+Remove-Item -LiteralPath $desktop, $startMenu, $legacyDesktop, $legacyStartMenu, $uninstallShortcut -Force -ErrorAction SilentlyContinue
 Get-ChildItem -LiteralPath $root -Force -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -ne 'uninstall.ps1' } |
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-Write-Host '启动器和快捷方式已删除。可以保留或手动删除：' $root
+Write-Host '增强启动器、图标和快捷方式已删除。'
 Write-Host '官方 ChatGPT、API 配置和历史记录均未修改。'
+Read-Host '按 Enter 关闭窗口'
+Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $root -Force -ErrorAction SilentlyContinue
 '@
     Write-Utf8NoBom -Path $uninstallPath -Content $uninstallScript
+
+    $uninstallShortcut = $shell.CreateShortcut((Join-Path $startMenuRoot '卸载 ChatGPT 中文版.lnk'))
+    $uninstallShortcut.TargetPath = (Get-Command 'powershell.exe').Source
+    $uninstallShortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$uninstallPath`""
+    $uninstallShortcut.WorkingDirectory = [IO.Path]::GetTempPath()
+    $uninstallShortcut.Description = '删除 ITOC 中文与语音增强，不影响官方 ChatGPT 和用户数据'
+    $uninstallShortcut.Save()
 
     Write-Host ''
     Write-Host '安装完成。请从任务栏托盘完全退出 ChatGPT，然后双击桌面的：'
