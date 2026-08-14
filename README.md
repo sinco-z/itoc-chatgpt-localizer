@@ -39,9 +39,9 @@ cargo run
 irm https://ai-relay.itoc.club/install/chatgpt-zh.ps1 | iex
 ```
 
-由于 Preview 暂未签名，安装器会展示明确警告，但不再要求输入确认短语。安装器会下载
-并校验 ITOC 原创的多分辨率图标；卸载只删除 ITOC 启动器和快捷方式，不会删除
-ChatGPT、`~/.codex` 或聊天历史。
+由于 Preview 暂未签名，安装器会展示一条简短提示，但不要求输入确认短语。快捷方式
+直接引用本机官方应用内置的多分辨率图标，不复制或重新分发官方图标；卸载只删除
+ITOC 启动器和快捷方式，不会删除 ChatGPT、`~/.codex` 或聊天历史。
 
 ## 兼容性策略
 

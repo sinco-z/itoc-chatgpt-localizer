@@ -1,14 +1,12 @@
 ﻿[CmdletBinding()]
 param(
-    [string]$Version = 'v0.1.8-preview.2'
+    [string]$Version = 'v0.1.9-preview.1'
 )
 
 $ErrorActionPreference = 'Stop'
 $AssetName = 'itoc-chatgpt-zh-windows-x64.exe'
-$IconAssetName = 'itoc-chatgpt-zh.ico'
 $InstallRoot = Join-Path $env:LOCALAPPDATA 'ITOC\ChatGPTZhPreview'
 $ExecutablePath = Join-Path $InstallRoot 'itoc-chatgpt-zh.exe'
-$IconPath = Join-Path $InstallRoot $IconAssetName
 
 function Write-Utf8NoBom([string]$Path, [string]$Content) {
     $utf8 = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList $false
@@ -29,36 +27,48 @@ function Assert-Sha256([string]$Path, [string]$Name, [string]$ChecksumsPath) {
     }
 }
 
-Write-Host ''
-Write-Warning '这是尚未完成代码签名的 Preview 中文与语音增强组件。Windows 可能显示安全警告。'
-Write-Host '它会以本机随机调试端口启动官方 ChatGPT；请只在受信任的电脑使用。'
+$officialPackage = Get-AppxPackage -Name 'OpenAI.Codex' -ErrorAction SilentlyContinue |
+    Sort-Object -Property Version -Descending |
+    Select-Object -First 1
+if (-not $officialPackage) {
+    $downloadUrl = 'https://get.microsoft.com/installer/download/9PLM9XGG6VKS?cid=website_cta_psi'
+    Write-Host "官方下载地址：$downloadUrl" -ForegroundColor Cyan
+    $openDownload = Read-Host '是否现在打开官方下载页面？ [y/N]'
+    if ($openDownload -match '^(?i:y|yes)$') {
+        Start-Process $downloadUrl
+    }
+    throw '未检测到官方 ChatGPT Windows 应用。请先安装后重新运行。'
+}
+$officialApp = @((Get-AppxPackageManifest -Package $officialPackage.PackageFullName).Package.Applications.Application) |
+    Select-Object -First 1
+$officialExecutable = Join-Path $officialPackage.InstallLocation $officialApp.Executable
+if (-not (Test-Path -LiteralPath $officialExecutable -PathType Leaf)) {
+    throw '已检测到 ChatGPT 应用包，但无法定位官方程序文件。请修复或重新安装官方应用。'
+}
+$officialIconSource = "$officialExecutable,0"
 
 $releaseUrl = "https://ai-relay.itoc.club/install/releases/$Version"
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) "itoc-chatgpt-zh-$([Guid]::NewGuid().ToString('N'))"
 $temporaryExe = Join-Path $temporaryRoot $AssetName
-$temporaryIcon = Join-Path $temporaryRoot $IconAssetName
 $temporaryChecksums = Join-Path $temporaryRoot 'SHA256SUMS.txt'
 
 try {
     New-Item -ItemType Directory -Path $temporaryRoot -Force | Out-Null
     Invoke-WebRequest -UseBasicParsing -Uri "$releaseUrl/$AssetName" -OutFile $temporaryExe
-    Invoke-WebRequest -UseBasicParsing -Uri "$releaseUrl/$IconAssetName" -OutFile $temporaryIcon
     Invoke-WebRequest -UseBasicParsing -Uri "$releaseUrl/SHA256SUMS.txt" -OutFile $temporaryChecksums
 
     Assert-Sha256 -Path $temporaryExe -Name $AssetName -ChecksumsPath $temporaryChecksums
-    Assert-Sha256 -Path $temporaryIcon -Name $IconAssetName -ChecksumsPath $temporaryChecksums
 
     $signature = Get-AuthenticodeSignature -LiteralPath $temporaryExe
     if ($signature.Status -eq 'Valid') {
         Write-Host "数字签名有效：$($signature.SignerCertificate.Subject)"
     }
     else {
-        Write-Warning "Preview 当前没有有效 Authenticode 签名：$($signature.Status)"
+        Write-Host '提示：中文与语音增强组件暂未代码签名，请只从 ai-relay.itoc.club 安装。' -ForegroundColor Yellow
     }
 
     New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
     Copy-Item -LiteralPath $temporaryExe -Destination $ExecutablePath -Force
-    Copy-Item -LiteralPath $temporaryIcon -Destination $IconPath -Force
 
     $shell = New-Object -ComObject WScript.Shell
     $desktopShortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) 'ChatGPT 中文版.lnk'
@@ -75,7 +85,7 @@ try {
         $shortcut.TargetPath = $ExecutablePath
         $shortcut.WorkingDirectory = $InstallRoot
         $shortcut.Description = '以中文界面和语音输入启动官方 ChatGPT'
-        $shortcut.IconLocation = "$IconPath,0"
+        $shortcut.IconLocation = $officialIconSource
         $shortcut.Save()
     }
 
