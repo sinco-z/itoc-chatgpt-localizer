@@ -25,7 +25,12 @@ fn show_message(message: &str, is_error: bool) {
             None,
             &message,
             &title,
-            MB_OK | if is_error { MB_ICONERROR } else { MB_ICONINFORMATION },
+            MB_OK
+                | if is_error {
+                    MB_ICONERROR
+                } else {
+                    MB_ICONINFORMATION
+                },
         );
     }
 }
@@ -54,9 +59,9 @@ pub fn send_voice_typing_shortcut() -> Result<(), String> {
         key(VK_LWIN, KEYEVENTF_KEYUP),
     ];
     let sent = unsafe { SendInput(&inputs, size_of::<INPUT>() as i32) };
-    (sent == inputs.len() as u32)
-        .then_some(())
-        .ok_or_else(|| "无法打开 Windows 语音输入。请确认 ChatGPT 窗口在前台且未以管理员身份运行。".to_string())
+    (sent == inputs.len() as u32).then_some(()).ok_or_else(|| {
+        "无法打开 Windows 语音输入。请确认 ChatGPT 窗口在前台且未以管理员身份运行。".to_string()
+    })
 }
 
 #[cfg(windows)]
@@ -156,7 +161,9 @@ $processIds -join ','
         .output()
         .map_err(|error| format!("无法检查 ChatGPT 进程状态：{error}"))?;
     if !output.status.success() {
-        return Err("无法检查 ChatGPT 是否已经运行。请先从系统托盘完全退出 ChatGPT 后重试。".to_string());
+        return Err(
+            "无法检查 ChatGPT 是否已经运行。请先从系统托盘完全退出 ChatGPT 后重试。".to_string(),
+        );
     }
 
     let process_ids = String::from_utf8_lossy(&output.stdout).trim().to_string();

@@ -1,5 +1,6 @@
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::thread;
@@ -8,6 +9,7 @@ use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{connect, Message, WebSocket};
 
 const INJECTION_SCRIPT: &str = include_str!("injection.js");
+const VOICE_TYPING_BINDING: &str = "__itocVoiceTyping";
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -39,32 +41,25 @@ pub fn wait_and_inject(port: u16) -> Result<(), String> {
         first.title,
         display_target_url(&first.url)
     );
-    inject_target(&first)?;
+    let mut client = inject_target(&first)?;
     println!("中文脚本已注册。这个窗口可以最小化；关闭 ChatGPT 后会自动退出。");
 
-    let mut active = first;
-    let mut active_url = active.web_socket_debugger_url.clone().unwrap_or_default();
-    let mut last_voice_typing_request = None;
+    let mut active_url = first.web_socket_debugger_url.clone().unwrap_or_default();
+    let mut connection_healthy = true;
     let mut next_target_check = Instant::now() + Duration::from_secs(2);
     let mut misses = 0_u8;
     loop {
-        thread::sleep(Duration::from_millis(300));
-        if let Ok(request_id) = voice_typing_request(&active) {
-            match last_voice_typing_request {
-                Some(previous) if request_id > previous => {
-                    #[cfg(windows)]
-                    if let Err(error) = crate::windows_app::send_voice_typing_shortcut() {
-                        eprintln!("Windows 语音输入未启动：{error}");
-                    }
-                    last_voice_typing_request = Some(request_id);
+        match client.next_event() {
+            Ok(Some(event)) if is_voice_typing_event(&event) => {
+                #[cfg(windows)]
+                if let Err(error) = crate::windows_app::send_voice_typing_shortcut() {
+                    crate::windows_app::show_error(&format!("Windows 语音输入未启动：{error}"));
                 }
-                // A page reload can keep the same CDP target while replacing the
-                // JavaScript global state, which resets this counter to zero.
-                Some(previous) if request_id < previous => {
-                    last_voice_typing_request = Some(request_id);
-                }
-                Some(_) => {}
-                None => last_voice_typing_request = Some(request_id),
+            }
+            Ok(_) => {}
+            Err(_) => {
+                connection_healthy = false;
+                thread::sleep(Duration::from_millis(100));
             }
         }
 
@@ -76,11 +71,10 @@ pub fn wait_and_inject(port: u16) -> Result<(), String> {
             Ok(target) => {
                 misses = 0;
                 let next_url = target.web_socket_debugger_url.clone().unwrap_or_default();
-                if !next_url.is_empty() && next_url != active_url {
-                    inject_target(&target)?;
+                if !next_url.is_empty() && (next_url != active_url || !connection_healthy) {
+                    client = inject_target(&target)?;
                     active_url = next_url;
-                    active = target;
-                    last_voice_typing_request = None;
+                    connection_healthy = true;
                     println!("检测到 ChatGPT 页面重建，已重新注入中文 Preview。");
                 }
             }
@@ -181,7 +175,7 @@ fn display_target_url(url: &str) -> &str {
     }
 }
 
-fn inject_target(target: &Target) -> Result<(), String> {
+fn inject_target(target: &Target) -> Result<CdpClient, String> {
     let websocket_url = target
         .web_socket_debugger_url
         .as_deref()
@@ -190,6 +184,11 @@ fn inject_target(target: &Target) -> Result<(), String> {
         connect(websocket_url).map_err(|error| format!("连接本机调试页面失败：{error}"))?;
     let mut client = CdpClient::new(socket)?;
 
+    client.call("Runtime.enable", json!({}))?;
+    client.call(
+        "Runtime.addBinding",
+        json!({ "name": VOICE_TYPING_BINDING }),
+    )?;
     client.call("Page.enable", json!({}))?;
     client.call(
         "Page.addScriptToEvaluateOnNewDocument",
@@ -205,30 +204,16 @@ fn inject_target(target: &Target) -> Result<(), String> {
         }),
     )?;
     verify_runtime_marker(&mut client)?;
-    report_locale_setting(&mut client);
-    let _ = client.socket.close(None);
-    Ok(())
+    if is_primary_app_page(&target.url) {
+        report_locale_setting(&mut client)?;
+    }
+    Ok(client)
 }
 
-fn voice_typing_request(target: &Target) -> Result<u64, String> {
-    let websocket_url = target
-        .web_socket_debugger_url
-        .as_deref()
-        .ok_or_else(|| "调试目标没有 WebSocket 地址".to_string())?;
-    let (socket, _) =
-        connect(websocket_url).map_err(|error| format!("连接语音输入状态失败：{error}"))?;
-    let mut client = CdpClient::new(socket)?;
-    let result = client.call(
-        "Runtime.evaluate",
-        json!({
-            "expression": "Number(globalThis.__ITOC_ZH_PREVIEW__?.voiceTypingRequestId || 0)",
-            "returnByValue": true
-        }),
-    )?;
-    result
-        .pointer("/result/value")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| "无法读取语音输入请求状态".to_string())
+fn is_voice_typing_event(event: &Value) -> bool {
+    event.get("method").and_then(Value::as_str) == Some("Runtime.bindingCalled")
+        && event.pointer("/params/name").and_then(Value::as_str) == Some(VOICE_TYPING_BINDING)
+        && event.pointer("/params/payload").and_then(Value::as_str) == Some("request")
 }
 
 type CdpSocket = WebSocket<MaybeTlsStream<TcpStream>>;
@@ -236,6 +221,7 @@ type CdpSocket = WebSocket<MaybeTlsStream<TcpStream>>;
 struct CdpClient {
     socket: CdpSocket,
     next_id: u64,
+    events: VecDeque<Value>,
 }
 
 impl CdpClient {
@@ -245,7 +231,11 @@ impl CdpClient {
                 .set_read_timeout(Some(Duration::from_millis(750)))
                 .map_err(|error| format!("设置调试连接超时失败：{error}"))?;
         }
-        Ok(Self { socket, next_id: 1 })
+        Ok(Self {
+            socket,
+            next_id: 1,
+            events: VecDeque::new(),
+        })
     }
 
     fn call(&mut self, method: &str, params: Value) -> Result<Value, String> {
@@ -265,6 +255,7 @@ impl CdpClient {
                     }
                     return Ok(response.get("result").cloned().unwrap_or(Value::Null));
                 }
+                Ok(event) if event.get("method").is_some() => self.events.push_back(event),
                 Ok(_) => {}
                 Err(error) if is_timeout(error.as_ref()) && Instant::now() < deadline => {}
                 Err(error) => return Err(format!("读取 CDP 命令 {method} 结果失败：{error}")),
@@ -272,6 +263,17 @@ impl CdpClient {
             if Instant::now() >= deadline {
                 return Err(format!("等待 CDP 命令 {method} 结果超时"));
             }
+        }
+    }
+
+    fn next_event(&mut self) -> Result<Option<Value>, String> {
+        if let Some(event) = self.events.pop_front() {
+            return Ok(Some(event));
+        }
+        match self.read_value() {
+            Ok(event) => Ok(Some(event)),
+            Err(error) if is_timeout(error.as_ref()) => Ok(None),
+            Err(error) => Err(format!("读取 CDP 事件失败：{error}")),
         }
     }
 
@@ -321,7 +323,7 @@ fn verify_runtime_marker(client: &mut CdpClient) -> Result<(), String> {
         .ok_or_else(|| "中文环境脚本没有在页面生效".to_string())
 }
 
-fn report_locale_setting(client: &mut CdpClient) {
+fn report_locale_setting(client: &mut CdpClient) -> Result<(), String> {
     let deadline = Instant::now() + Duration::from_secs(15);
     let expression = r#"JSON.stringify(globalThis.__ITOC_ZH_PREVIEW__ ? {
         bridgeAvailable: globalThis.__ITOC_ZH_PREVIEW__.bridgeAvailable,
@@ -347,24 +349,22 @@ fn report_locale_setting(client: &mut CdpClient) {
         match status.get("settingStatus").and_then(Value::as_str) {
             Some("ready") => {
                 println!("已确认应用语言设置：zh-CN。");
-                return;
+                return Ok(());
             }
             Some("bridge-unavailable") => {
-                println!("诊断：正式页面未提供设置接口，无法写入应用语言设置。");
-                return;
+                return Err("正式页面未提供设置接口，无法写入应用语言设置".to_string());
             }
             Some("failed") => {
                 let detail = status
                     .get("settingError")
                     .and_then(Value::as_str)
                     .unwrap_or("未知错误");
-                println!("诊断：写入应用语言设置失败：{detail}");
-                return;
+                return Err(format!("写入应用语言设置失败：{detail}"));
             }
             _ => {}
         }
     }
-    println!("诊断：等待应用确认语言设置超时。");
+    Err("等待应用确认语言设置超时".to_string())
 }
 
 fn validate_websocket_url(url: &str, expected_port: u16) -> Result<(), String> {
@@ -566,8 +566,21 @@ mod tests {
     fn injection_adds_a_voice_typing_button_without_using_chatgpt_voice_mode() {
         assert!(INJECTION_SCRIPT.contains("itoc-voice-typing-button"));
         assert!(INJECTION_SCRIPT.contains("Windows 语音输入（Win+H）"));
-        assert!(INJECTION_SCRIPT.contains("voiceTypingRequestId"));
+        assert!(INJECTION_SCRIPT.contains(VOICE_TYPING_BINDING));
         assert!(!INJECTION_SCRIPT.contains("navigator.mediaDevices"));
+    }
+
+    #[test]
+    fn recognizes_only_the_expected_voice_typing_binding() {
+        let expected = json!({
+            "method": "Runtime.bindingCalled",
+            "params": { "name": VOICE_TYPING_BINDING, "payload": "request" }
+        });
+        assert!(is_voice_typing_event(&expected));
+        assert!(!is_voice_typing_event(&json!({
+            "method": "Runtime.bindingCalled",
+            "params": { "name": VOICE_TYPING_BINDING, "payload": "unexpected" }
+        })));
     }
 
     #[test]

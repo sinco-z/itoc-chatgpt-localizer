@@ -1,11 +1,12 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.1.9-preview.1";
+  const VERSION = "0.1.7-preview.1";
   const LOCALE = "zh-CN";
   const I18N_CONFIG_ID = "72216192";
   const RELOAD_MARKER = "itoc.zh.locale.reload.v1";
   const VOICE_BUTTON_ID = "itoc-voice-typing-button";
+  const VOICE_BINDING = "__itocVoiceTyping";
 
   if (globalThis.__ITOC_ZH_PREVIEW__?.version === VERSION) {
     return globalThis.__ITOC_ZH_PREVIEW__;
@@ -18,7 +19,6 @@
     bridgeAvailable: false,
     settingStatus: "pending",
     settingError: null,
-    voiceTypingRequestId: 0,
     installedAt: new Date().toISOString(),
   };
   globalThis.__ITOC_ZH_PREVIEW__ = state;
@@ -148,7 +148,8 @@
     } catch (_) {
       composer.focus();
     }
-    state.voiceTypingRequestId += 1;
+    const binding = globalThis[VOICE_BINDING];
+    if (typeof binding === "function") binding("request");
   };
 
   const voiceTypingButtonHost = () => {
