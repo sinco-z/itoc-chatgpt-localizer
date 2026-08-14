@@ -53,11 +53,16 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path dist -Force | Out-Null
           Copy-Item target/release/itoc-chatgpt-zh.exe dist/itoc-chatgpt-zh-windows-x64.exe
-          $hash = (Get-FileHash dist/itoc-chatgpt-zh-windows-x64.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          Copy-Item assets/itoc-chatgpt-zh.ico dist/itoc-chatgpt-zh.ico
+          $files = @('itoc-chatgpt-zh-windows-x64.exe', 'itoc-chatgpt-zh.ico')
+          $lines = foreach ($file in $files) {
+            $hash = (Get-FileHash (Join-Path 'dist' $file) -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $file"
+          }
           $utf8 = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList $false
           [IO.File]::WriteAllText(
             (Join-Path $PWD 'dist/SHA256SUMS.txt'),
-            "$hash  itoc-chatgpt-zh-windows-x64.exe`n",
+            ($lines -join "`n") + "`n",
             $utf8
           )
 
