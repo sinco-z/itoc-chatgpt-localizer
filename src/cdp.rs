@@ -626,9 +626,11 @@ mod tests {
     }
 
     #[test]
-    fn injection_reloads_once_when_locale_is_already_set() {
+    fn injection_does_not_reload_when_locale_is_already_set() {
         assert!(INJECTION_SCRIPT.contains("reloadOnceForLocaleHooks"));
-        assert!(INJECTION_SCRIPT.contains("sessionStorage.getItem(RELOAD_MARKER) === LOCALE"));
+        assert!(INJECTION_SCRIPT.contains("let shouldReload = false"));
+        assert!(INJECTION_SCRIPT
+            .contains("shouldReload = sessionStorage.getItem(RELOAD_MARKER) === LOCALE"));
         assert!(INJECTION_SCRIPT.contains("sessionStorage.removeItem(RELOAD_MARKER)"));
 
         let ready_branch = INJECTION_SCRIPT
@@ -638,7 +640,7 @@ mod tests {
             .split("await callSettingApi")
             .next()
             .expect("ready locale branch should end before setting the locale");
-        assert!(ready_branch.contains("reloadOnceForLocaleHooks()"));
+        assert!(!ready_branch.contains("reloadOnceForLocaleHooks()"));
     }
 
     #[test]

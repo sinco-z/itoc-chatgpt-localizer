@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.1.9-preview.5";
+  const VERSION = "0.1.9-preview.6";
   const LOCALE = "zh-CN";
   const I18N_CONFIG_ID = "72216192";
   const RELOAD_MARKER = "itoc.zh.locale.reload.v1";
@@ -102,13 +102,11 @@
     });
 
   const reloadOnceForLocaleHooks = () => {
-    let shouldReload = true;
+    let shouldReload = false;
     try {
-      if (sessionStorage.getItem(RELOAD_MARKER) === LOCALE) {
-        sessionStorage.removeItem(RELOAD_MARKER);
-        shouldReload = false;
-      } else {
+      if (sessionStorage.getItem(RELOAD_MARKER) !== LOCALE) {
         sessionStorage.setItem(RELOAD_MARKER, LOCALE);
+        shouldReload = sessionStorage.getItem(RELOAD_MARKER) === LOCALE;
       }
     } catch (_) {}
     if (shouldReload) setTimeout(() => location.reload(), 100);
@@ -125,7 +123,9 @@
       const current = await callSettingApi(bridge, "get-setting", { key: "localeOverride" });
       if (current?.value === LOCALE) {
         state.settingStatus = "ready";
-        reloadOnceForLocaleHooks();
+        try {
+          sessionStorage.removeItem(RELOAD_MARKER);
+        } catch (_) {}
         return;
       }
       await callSettingApi(bridge, "set-setting", { key: "localeOverride", value: LOCALE });
