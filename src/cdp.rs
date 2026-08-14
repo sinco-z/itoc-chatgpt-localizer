@@ -579,6 +579,20 @@ mod tests {
     }
 
     #[test]
+    fn injection_tolerates_slow_first_startup_with_bounded_retries() {
+        assert!(INJECTION_SCRIPT.contains("const BRIDGE_WAIT_MS = 30000"));
+        assert!(INJECTION_SCRIPT.contains("const SETTING_SYNC_TIMEOUT_MS = 30000"));
+        assert!(INJECTION_SCRIPT
+            .contains("const SETTING_RETRY_DELAYS_MS = [0, 500, 1000, 2000, 4000, 8000]"));
+        assert!(INJECTION_SCRIPT.contains("for (const delay of SETTING_RETRY_DELAYS_MS)"));
+        assert!(INJECTION_SCRIPT.contains("Date.now() + delay > settingDeadline"));
+        assert!(INJECTION_SCRIPT.contains("const CONFIG_POLL_INTERVAL_MS = 250"));
+        assert!(INJECTION_SCRIPT.contains("const CONFIG_POLL_ATTEMPTS = 240"));
+        assert!(INJECTION_SCRIPT.contains("state.patchedClients > 0"));
+        assert!(INJECTION_SCRIPT.contains("state.settingStatus = \"failed\""));
+    }
+
+    #[test]
     fn injection_adds_a_voice_typing_button_without_using_chatgpt_voice_mode() {
         assert!(INJECTION_SCRIPT.contains("itoc-voice-typing-button"));
         assert!(INJECTION_SCRIPT.contains("Windows 语音输入（Win+H）"));
