@@ -42,10 +42,36 @@ pub fn wait_and_inject(port: u16) -> Result<(), String> {
     inject_target(&first)?;
     println!("中文脚本已注册。这个窗口可以最小化；关闭 ChatGPT 后会自动退出。");
 
-    let mut active_url = first.web_socket_debugger_url.unwrap_or_default();
+    let mut active = first;
+    let mut active_url = active.web_socket_debugger_url.clone().unwrap_or_default();
+    let mut last_voice_typing_request = None;
+    let mut next_target_check = Instant::now() + Duration::from_secs(2);
     let mut misses = 0_u8;
     loop {
-        thread::sleep(Duration::from_secs(2));
+        thread::sleep(Duration::from_millis(300));
+        if let Ok(request_id) = voice_typing_request(&active) {
+            match last_voice_typing_request {
+                Some(previous) if request_id > previous => {
+                    #[cfg(windows)]
+                    if let Err(error) = crate::windows_app::send_voice_typing_shortcut() {
+                        eprintln!("Windows 语音输入未启动：{error}");
+                    }
+                    last_voice_typing_request = Some(request_id);
+                }
+                // A page reload can keep the same CDP target while replacing the
+                // JavaScript global state, which resets this counter to zero.
+                Some(previous) if request_id < previous => {
+                    last_voice_typing_request = Some(request_id);
+                }
+                Some(_) => {}
+                None => last_voice_typing_request = Some(request_id),
+            }
+        }
+
+        if Instant::now() < next_target_check {
+            continue;
+        }
+        next_target_check = Instant::now() + Duration::from_secs(2);
         match find_target(port) {
             Ok(target) => {
                 misses = 0;
@@ -53,6 +79,8 @@ pub fn wait_and_inject(port: u16) -> Result<(), String> {
                 if !next_url.is_empty() && next_url != active_url {
                     inject_target(&target)?;
                     active_url = next_url;
+                    active = target;
+                    last_voice_typing_request = None;
                     println!("检测到 ChatGPT 页面重建，已重新注入中文 Preview。");
                 }
             }
@@ -180,6 +208,27 @@ fn inject_target(target: &Target) -> Result<(), String> {
     report_locale_setting(&mut client);
     let _ = client.socket.close(None);
     Ok(())
+}
+
+fn voice_typing_request(target: &Target) -> Result<u64, String> {
+    let websocket_url = target
+        .web_socket_debugger_url
+        .as_deref()
+        .ok_or_else(|| "调试目标没有 WebSocket 地址".to_string())?;
+    let (socket, _) =
+        connect(websocket_url).map_err(|error| format!("连接语音输入状态失败：{error}"))?;
+    let mut client = CdpClient::new(socket)?;
+    let result = client.call(
+        "Runtime.evaluate",
+        json!({
+            "expression": "Number(globalThis.__ITOC_ZH_PREVIEW__?.voiceTypingRequestId || 0)",
+            "returnByValue": true
+        }),
+    )?;
+    result
+        .pointer("/result/value")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "无法读取语音输入请求状态".to_string())
 }
 
 type CdpSocket = WebSocket<MaybeTlsStream<TcpStream>>;
@@ -511,6 +560,14 @@ mod tests {
         assert!(INJECTION_SCRIPT.contains("enable_i18n"));
         assert!(!INJECTION_SCRIPT.contains("Fetch.enable"));
         assert!(!INJECTION_SCRIPT.contains("Fetch.fulfillRequest"));
+    }
+
+    #[test]
+    fn injection_adds_a_voice_typing_button_without_using_chatgpt_voice_mode() {
+        assert!(INJECTION_SCRIPT.contains("itoc-voice-typing-button"));
+        assert!(INJECTION_SCRIPT.contains("Windows 语音输入（Win+H）"));
+        assert!(INJECTION_SCRIPT.contains("voiceTypingRequestId"));
+        assert!(!INJECTION_SCRIPT.contains("navigator.mediaDevices"));
     }
 
     #[test]

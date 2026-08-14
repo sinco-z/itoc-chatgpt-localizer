@@ -1,6 +1,6 @@
 [package]
 name = "itoc-chatgpt-localizer"
-version = "0.1.6-preview.1"
+version = "0.1.9-preview.1"
 edition = "2021"
 license = "MIT"
 description = "Experimental Chinese locale launcher for the official ChatGPT Windows app"
@@ -20,6 +20,8 @@ windows = { version = "0.61", features = [
   "Win32_System_Console",
   "Win32_System_Com",
   "Win32_UI_Shell",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
 ] }
 
 [profile.release]

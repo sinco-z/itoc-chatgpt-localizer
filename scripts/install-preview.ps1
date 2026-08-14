@@ -1,6 +1,6 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
-    [string]$Version = 'v0.1.6-preview.1',
+    [string]$Version = 'v0.1.7-preview.1',
     [switch]$AcceptUnsignedPreview
 )
 
@@ -58,14 +58,34 @@ try {
     Copy-Item -LiteralPath $temporaryExe -Destination $ExecutablePath -Force
 
     $shell = New-Object -ComObject WScript.Shell
-    $desktopShortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) 'ITOC ChatGPT 中文 Preview.lnk'
+    $desktopShortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) 'ChatGPT 中文版.lnk'
     $startMenuRoot = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\ITOC'
     New-Item -ItemType Directory -Path $startMenuRoot -Force | Out-Null
-    foreach ($shortcutPath in @($desktopShortcut, (Join-Path $startMenuRoot 'ChatGPT 中文 Preview.lnk'))) {
+    $iconSource = $null
+    try {
+        $officialPackage = Get-AppxPackage -Name 'OpenAI.Codex' -ErrorAction Stop |
+            Sort-Object -Property Version -Descending |
+            Select-Object -First 1
+        $officialApp = @((Get-AppxPackageManifest -Package $officialPackage.PackageFullName).Package.Applications.Application) |
+            Select-Object -First 1
+        $officialExecutable = Join-Path $officialPackage.InstallLocation $officialApp.Executable
+        if (Test-Path -LiteralPath $officialExecutable) {
+            $iconSource = "$officialExecutable,0"
+        }
+    }
+    catch {
+        Write-Warning '未能读取官方 ChatGPT 图标；快捷方式将使用启动器默认图标。'
+    }
+    $legacyDesktopShortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) 'ITOC ChatGPT 中文 Preview.lnk'
+    $legacyStartMenuShortcut = Join-Path $startMenuRoot 'ChatGPT 中文 Preview.lnk'
+    Remove-Item -LiteralPath $legacyDesktopShortcut -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $legacyStartMenuShortcut -Force -ErrorAction SilentlyContinue
+    foreach ($shortcutPath in @($desktopShortcut, (Join-Path $startMenuRoot 'ChatGPT 中文版.lnk'))) {
         $shortcut = $shell.CreateShortcut($shortcutPath)
         $shortcut.TargetPath = $ExecutablePath
         $shortcut.WorkingDirectory = $InstallRoot
-        $shortcut.Description = '以实验性中文界面启动官方 ChatGPT'
+        $shortcut.Description = '以中文界面和语音输入启动官方 ChatGPT'
+        if ($iconSource) { $shortcut.IconLocation = $iconSource }
         $shortcut.Save()
     }
 
@@ -73,10 +93,11 @@ try {
     $uninstallScript = @'
 $ErrorActionPreference = 'Stop'
 $root = Join-Path $env:LOCALAPPDATA 'ITOC\ChatGPTZhPreview'
-$desktop = Join-Path ([Environment]::GetFolderPath('Desktop')) 'ITOC ChatGPT 中文 Preview.lnk'
-$startMenu = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\ITOC\ChatGPT 中文 Preview.lnk'
-Remove-Item -LiteralPath $desktop -Force -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath $startMenu -Force -ErrorAction SilentlyContinue
+$desktop = Join-Path ([Environment]::GetFolderPath('Desktop')) 'ChatGPT 中文版.lnk'
+$startMenu = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\ITOC\ChatGPT 中文版.lnk'
+$legacyDesktop = Join-Path ([Environment]::GetFolderPath('Desktop')) 'ITOC ChatGPT 中文 Preview.lnk'
+$legacyStartMenu = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\ITOC\ChatGPT 中文 Preview.lnk'
+Remove-Item -LiteralPath $desktop, $startMenu, $legacyDesktop, $legacyStartMenu -Force -ErrorAction SilentlyContinue
 Get-ChildItem -LiteralPath $root -Force -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -ne 'uninstall.ps1' } |
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
