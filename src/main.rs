@@ -5,9 +5,13 @@ mod windows_app;
 
 #[cfg(windows)]
 fn main() {
+    windows_app::reset_log();
+    windows_app::append_log("launcher started");
     if let Err(error) = run() {
+        windows_app::append_log(&format!("launcher failed: {error}"));
         windows_app::show_error(&format!(
-            "{error}\n\n请改用官方 ChatGPT 快捷方式启动；本程序不会修改或删除用户数据。"
+            "{error}\n\n已尝试关闭本次启动留下的 ChatGPT 进程。请改用官方快捷方式启动。\n诊断日志：{}\n本程序不会修改或删除用户数据。",
+            windows_app::log_path().display()
         ));
         std::process::exit(1);
     }
@@ -24,6 +28,10 @@ fn run() -> Result<(), String> {
     use std::net::TcpListener;
 
     let app = windows_app::detect()?;
+    windows_app::append_log(&format!(
+        "detected package {} version {}",
+        app.package_full_name, app.version
+    ));
 
     if std::env::args().any(|argument| argument == "--diagnose") {
         windows_app::show_info(&format!(
@@ -52,6 +60,18 @@ fn run() -> Result<(), String> {
     .collect::<Vec<_>>()
     .join(" ");
 
-    let _process_id = windows_app::launch(&app.app_user_model_id, &arguments)?;
-    cdp::wait_and_inject(port)
+    let process_id = windows_app::launch(&app.app_user_model_id, &arguments)?;
+    windows_app::append_log(&format!(
+        "activation requested: pid={process_id}, debug_port={port}"
+    ));
+    if let Err(error) = cdp::wait_and_inject(port) {
+        windows_app::append_log(&format!("runtime integration failed: {error}"));
+        if let Err(cleanup_error) = windows_app::stop_package_processes(&app) {
+            windows_app::append_log(&format!("process cleanup failed: {cleanup_error}"));
+            return Err(format!("{error}\n清理后台进程失败：{cleanup_error}"));
+        }
+        windows_app::append_log("package processes stopped after startup failure");
+        return Err(error);
+    }
+    Ok(())
 }

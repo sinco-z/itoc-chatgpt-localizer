@@ -2,6 +2,47 @@
 use serde::Deserialize;
 
 #[cfg(windows)]
+pub fn log_path() -> std::path::PathBuf {
+    let root = std::env::var_os("LOCALAPPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("ITOC")
+        .join("ChatGPTZhPreview");
+    root.join("launcher.log")
+}
+
+#[cfg(windows)]
+pub fn reset_log() {
+    let path = log_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, "");
+}
+
+#[cfg(windows)]
+pub fn append_log(message: &str) {
+    use std::io::Write;
+
+    let path = log_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    else {
+        return;
+    };
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    let _ = writeln!(file, "[{timestamp}] {message}");
+}
+
+#[cfg(windows)]
 fn hidden_powershell() -> std::process::Command {
     use std::os::windows::process::CommandExt;
 
@@ -75,7 +116,7 @@ pub fn send_voice_typing_shortcut() -> Result<(), String> {
 }
 
 #[cfg(windows)]
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InstalledApp {
     pub app_user_model_id: String,
@@ -140,6 +181,7 @@ $installLocation = ([string]$env:ITOC_CHATGPT_INSTALL_LOCATION).TrimEnd('\')
 if ([string]::IsNullOrWhiteSpace($installLocation)) {
   exit 2
 }
+
 $processIds = @(
   Get-Process -Name 'ChatGPT' -ErrorAction SilentlyContinue |
     ForEach-Object {
@@ -184,6 +226,44 @@ $processIds -join ','
     Err(format!(
         "检测到官方 ChatGPT 已在运行（PID：{process_ids}）。请在系统托盘右键 ChatGPT 并选择“退出”，确认所有 ChatGPT 进程关闭后，再重新运行中文启动器。"
     ))
+}
+
+#[cfg(windows)]
+pub fn stop_package_processes(app: &InstalledApp) -> Result<(), String> {
+    const SCRIPT: &str = r#"
+$installLocation = ([string]$env:ITOC_CHATGPT_INSTALL_LOCATION).TrimEnd('\')
+if ([string]::IsNullOrWhiteSpace($installLocation)) { exit 2 }
+Get-Process -Name 'ChatGPT' -ErrorAction SilentlyContinue |
+  ForEach-Object {
+    try {
+      $path = [string]$_.Path
+      if ($path.StartsWith($installLocation, [System.StringComparison]::OrdinalIgnoreCase)) {
+        Stop-Process -Id $_.Id -Force -ErrorAction Stop
+      }
+    }
+    catch { }
+  }
+"#;
+
+    let status = hidden_powershell()
+        .env("ITOC_CHATGPT_INSTALL_LOCATION", &app.install_location)
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-WindowStyle",
+            "Hidden",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            SCRIPT,
+        ])
+        .status()
+        .map_err(|error| format!("无法调用 PowerShell 清理后台进程：{error}"))?;
+    status
+        .success()
+        .then_some(())
+        .ok_or_else(|| "PowerShell 未能完成后台进程清理".to_string())
 }
 
 #[cfg(windows)]

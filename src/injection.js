@@ -1,17 +1,12 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.1.9-preview.4";
+  const VERSION = "0.1.9-preview.5";
   const LOCALE = "zh-CN";
   const I18N_CONFIG_ID = "72216192";
   const RELOAD_MARKER = "itoc.zh.locale.reload.v1";
   const VOICE_BUTTON_ID = "itoc-voice-typing-button";
   const VOICE_BINDING = "__itocVoiceTyping";
-  const BRIDGE_WAIT_MS = 30000;
-  const SETTING_SYNC_TIMEOUT_MS = 30000;
-  const SETTING_RETRY_DELAYS_MS = [0, 500, 1000, 2000, 4000, 8000];
-  const CONFIG_POLL_INTERVAL_MS = 250;
-  const CONFIG_POLL_ATTEMPTS = 240;
 
   if (globalThis.__ITOC_ZH_PREVIEW__?.version === VERSION) {
     return globalThis.__ITOC_ZH_PREVIEW__;
@@ -23,9 +18,7 @@
     patchedClients: 0,
     bridgeAvailable: false,
     settingStatus: "pending",
-    settingAttempts: 0,
     settingError: null,
-    configWatchStatus: "pending",
     installedAt: new Date().toISOString(),
   };
   globalThis.__ITOC_ZH_PREVIEW__ = state;
@@ -46,8 +39,6 @@
     document.documentElement?.setAttribute("lang", LOCALE);
   } catch (_) {}
 
-  const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
-
   const waitForBridge = () =>
     new Promise((resolve) => {
       const startedAt = Date.now();
@@ -56,11 +47,11 @@
         if (bridge && typeof bridge.sendMessageFromView === "function") {
           clearInterval(timer);
           resolve(bridge);
-        } else if (Date.now() - startedAt >= BRIDGE_WAIT_MS) {
+        } else if (Date.now() - startedAt >= 8000) {
           clearInterval(timer);
           resolve(null);
         }
-      }, 100);
+      }, 50);
     });
 
   const callSettingApi = (bridge, method, params) =>
@@ -130,35 +121,24 @@
       state.settingStatus = "bridge-unavailable";
       return;
     }
-    const settingDeadline = Date.now() + SETTING_SYNC_TIMEOUT_MS;
-    for (const delay of SETTING_RETRY_DELAYS_MS) {
-      if (Date.now() + delay > settingDeadline) break;
-      if (delay > 0) await sleep(delay);
-      state.settingAttempts += 1;
-      try {
-        const current = await callSettingApi(bridge, "get-setting", { key: "localeOverride" });
-        if (current?.value === LOCALE) {
-          state.settingStatus = "ready";
-          state.settingError = null;
-          reloadOnceForLocaleHooks();
-          return;
-        }
-        await callSettingApi(bridge, "set-setting", { key: "localeOverride", value: LOCALE });
-        const verified = await callSettingApi(bridge, "get-setting", { key: "localeOverride" });
-        if (verified?.value !== LOCALE) {
-          throw new Error(`localeOverride was not persisted (received ${String(verified?.value)})`);
-        }
-        state.settingStatus = "updated";
-        state.settingError = null;
+    try {
+      const current = await callSettingApi(bridge, "get-setting", { key: "localeOverride" });
+      if (current?.value === LOCALE) {
+        state.settingStatus = "ready";
         reloadOnceForLocaleHooks();
         return;
-      } catch (error) {
-        state.settingStatus = "retrying";
-        state.settingError = String(error?.message || error);
       }
-      if (Date.now() >= settingDeadline) break;
+      await callSettingApi(bridge, "set-setting", { key: "localeOverride", value: LOCALE });
+      const verified = await callSettingApi(bridge, "get-setting", { key: "localeOverride" });
+      if (verified?.value !== LOCALE) {
+        throw new Error(`localeOverride was not persisted (received ${String(verified?.value)})`);
+      }
+      state.settingStatus = "updated";
+      reloadOnceForLocaleHooks();
+    } catch (error) {
+      state.settingStatus = "failed";
+      state.settingError = String(error?.message || error);
     }
-    state.settingStatus = "failed";
   };
 
   syncOfficialLocale();
@@ -260,7 +240,6 @@
       enableI18n(client.getDynamicConfig(I18N_CONFIG_ID, { disableExposureLog: true }));
     } catch (_) {}
     state.patchedClients += 1;
-    state.configWatchStatus = "ready";
     return true;
   };
 
@@ -322,11 +301,8 @@
   const timer = setInterval(() => {
     attempts += 1;
     patchRoot(globalThis.__STATSIG__);
-    if (state.patchedClients > 0 || attempts >= CONFIG_POLL_ATTEMPTS) {
-      if (state.patchedClients === 0) state.configWatchStatus = "timed-out";
-      clearInterval(timer);
-    }
-  }, CONFIG_POLL_INTERVAL_MS);
+    if (attempts >= 200) clearInterval(timer);
+  }, 50);
 
   return state;
 })();

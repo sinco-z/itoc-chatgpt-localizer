@@ -10,7 +10,7 @@ use tungstenite::{connect, Message, WebSocket};
 
 const INJECTION_SCRIPT: &str = include_str!("injection.js");
 const VOICE_TYPING_BINDING: &str = "__itocVoiceTyping";
-const LOCALE_REPORT_TIMEOUT: Duration = Duration::from_secs(70);
+const LOCALE_REPORT_TIMEOUT: Duration = Duration::from_secs(35);
 const LOCALE_REPORT_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Debug, Deserialize)]
@@ -43,7 +43,15 @@ pub fn wait_and_inject(port: u16) -> Result<(), String> {
         first.title,
         display_target_url(&first.url)
     );
+    #[cfg(windows)]
+    crate::windows_app::append_log(&format!(
+        "connected target: {} ({})",
+        first.title,
+        display_target_url(&first.url)
+    ));
     let mut client = inject_target(&first)?;
+    #[cfg(windows)]
+    crate::windows_app::append_log("runtime injection completed");
     println!("中文脚本已注册。这个窗口可以最小化；关闭 ChatGPT 后会自动退出。");
 
     let mut active_url = first.web_socket_debugger_url.clone().unwrap_or_default();
@@ -64,6 +72,10 @@ pub fn wait_and_inject(port: u16) -> Result<(), String> {
             }
             Ok(_) => {}
             Err(_) => {
+                if connection_healthy {
+                    #[cfg(windows)]
+                    crate::windows_app::append_log("debug page connection was interrupted");
+                }
                 connection_healthy = false;
                 thread::sleep(Duration::from_millis(100));
             }
@@ -78,17 +90,25 @@ pub fn wait_and_inject(port: u16) -> Result<(), String> {
             match poll_locale_setting(&mut client) {
                 Ok(LocaleSettingStatus::Ready) => {
                     println!("已确认应用语言设置：zh-CN。");
+                    #[cfg(windows)]
+                    crate::windows_app::append_log("locale setting confirmed: zh-CN");
                     locale_report_finished = true;
                     locale_report_deadline = None;
                 }
                 Ok(LocaleSettingStatus::Failed(detail)) => {
                     eprintln!("语言设置未完成：{detail}。语音增强仍会继续运行。");
+                    #[cfg(windows)]
+                    crate::windows_app::append_log(&format!("locale setting failed: {detail}"));
                     locale_report_finished = true;
                     locale_report_deadline = None;
                 }
                 Ok(LocaleSettingStatus::Pending) => {
                     if locale_report_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                         eprintln!("语言设置仍在后台初始化；启动器将继续运行，不影响语音增强。");
+                        #[cfg(windows)]
+                        crate::windows_app::append_log(
+                            "locale monitor timed out; launcher remains active",
+                        );
                         locale_report_finished = true;
                         locale_report_deadline = None;
                     }
@@ -121,6 +141,8 @@ pub fn wait_and_inject(port: u16) -> Result<(), String> {
                         next_locale_check = Instant::now();
                     }
                     println!("检测到 ChatGPT 页面重建，已重新注入中文 Preview。");
+                    #[cfg(windows)]
+                    crate::windows_app::append_log("page rebuilt; runtime injection restored");
                 }
             }
             Err(_) => {
@@ -620,16 +642,10 @@ mod tests {
     }
 
     #[test]
-    fn injection_tolerates_slow_first_startup_with_bounded_retries() {
-        assert!(INJECTION_SCRIPT.contains("const BRIDGE_WAIT_MS = 30000"));
-        assert!(INJECTION_SCRIPT.contains("const SETTING_SYNC_TIMEOUT_MS = 30000"));
-        assert!(INJECTION_SCRIPT
-            .contains("const SETTING_RETRY_DELAYS_MS = [0, 500, 1000, 2000, 4000, 8000]"));
-        assert!(INJECTION_SCRIPT.contains("for (const delay of SETTING_RETRY_DELAYS_MS)"));
-        assert!(INJECTION_SCRIPT.contains("Date.now() + delay > settingDeadline"));
-        assert!(INJECTION_SCRIPT.contains("const CONFIG_POLL_INTERVAL_MS = 250"));
-        assert!(INJECTION_SCRIPT.contains("const CONFIG_POLL_ATTEMPTS = 240"));
-        assert!(INJECTION_SCRIPT.contains("state.patchedClients > 0"));
+    fn injection_uses_a_single_bounded_locale_attempt() {
+        assert!(INJECTION_SCRIPT.contains("Date.now() - startedAt >= 8000"));
+        assert!(!INJECTION_SCRIPT.contains("SETTING_RETRY_DELAYS_MS"));
+        assert!(!INJECTION_SCRIPT.contains("for (const delay"));
         assert!(INJECTION_SCRIPT.contains("state.settingStatus = \"failed\""));
     }
 
