@@ -62,6 +62,7 @@ try {
     $startMenuRoot = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\ITOC'
     New-Item -ItemType Directory -Path $startMenuRoot -Force | Out-Null
     $iconSource = $null
+    $iconPath = Join-Path $InstallRoot 'chatgpt.ico'
     try {
         $officialPackage = Get-AppxPackage -Name 'OpenAI.Codex' -ErrorAction Stop |
             Sort-Object -Property Version -Descending |
@@ -71,6 +72,17 @@ try {
         $officialExecutable = Join-Path $officialPackage.InstallLocation $officialApp.Executable
         if (Test-Path -LiteralPath $officialExecutable) {
             $iconSource = "$officialExecutable,0"
+            Add-Type -AssemblyName System.Drawing
+            $icon = [System.Drawing.Icon]::ExtractAssociatedIcon($officialExecutable)
+            if ($icon) {
+                $iconStream = [IO.File]::Create($iconPath)
+                try { $icon.Save($iconStream) }
+                finally {
+                    $iconStream.Dispose()
+                    $icon.Dispose()
+                }
+                $iconSource = "$iconPath,0"
+            }
         }
     }
     catch {
@@ -80,7 +92,9 @@ try {
     $legacyStartMenuShortcut = Join-Path $startMenuRoot 'ChatGPT 中文 Preview.lnk'
     Remove-Item -LiteralPath $legacyDesktopShortcut -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $legacyStartMenuShortcut -Force -ErrorAction SilentlyContinue
-    foreach ($shortcutPath in @($desktopShortcut, (Join-Path $startMenuRoot 'ChatGPT 中文版.lnk'))) {
+    $shortcutPaths = @($desktopShortcut, (Join-Path $startMenuRoot 'ChatGPT 中文版.lnk'))
+    Remove-Item -LiteralPath $shortcutPaths -Force -ErrorAction SilentlyContinue
+    foreach ($shortcutPath in $shortcutPaths) {
         $shortcut = $shell.CreateShortcut($shortcutPath)
         $shortcut.TargetPath = $ExecutablePath
         $shortcut.WorkingDirectory = $InstallRoot

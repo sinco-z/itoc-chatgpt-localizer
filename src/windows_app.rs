@@ -2,6 +2,16 @@
 use serde::Deserialize;
 
 #[cfg(windows)]
+fn hidden_powershell() -> std::process::Command {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let mut command = std::process::Command::new("powershell.exe");
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
+}
+
+#[cfg(windows)]
 pub fn show_error(message: &str) {
     show_message(message, true);
 }
@@ -76,8 +86,6 @@ pub struct InstalledApp {
 
 #[cfg(windows)]
 pub fn detect() -> Result<InstalledApp, String> {
-    use std::process::Command;
-
     const SCRIPT: &str = r#"
 $ErrorActionPreference = 'Stop'
 $pkg = Get-AppxPackage -Name 'OpenAI.Codex' -ErrorAction Stop |
@@ -96,11 +104,13 @@ if ([string]::IsNullOrWhiteSpace($appId)) { $appId = 'App' }
 } | ConvertTo-Json -Compress
 "#;
 
-    let output = Command::new("powershell.exe")
+    let output = hidden_powershell()
         .args([
             "-NoLogo",
             "-NoProfile",
             "-NonInteractive",
+            "-WindowStyle",
+            "Hidden",
             "-ExecutionPolicy",
             "Bypass",
             "-Command",
@@ -121,8 +131,6 @@ if ([string]::IsNullOrWhiteSpace($appId)) { $appId = 'App' }
 
 #[cfg(windows)]
 pub fn ensure_not_running(app: &InstalledApp) -> Result<(), String> {
-    use std::process::Command;
-
     // App activation reuses an existing ChatGPT process. In that case Windows ignores the
     // remote-debugging arguments, so the launcher cannot inject the temporary locale script.
     // Match the executable path against the package we detected instead of treating every
@@ -147,12 +155,14 @@ $processIds = @(
 $processIds -join ','
 "#;
 
-    let output = Command::new("powershell.exe")
+    let output = hidden_powershell()
         .env("ITOC_CHATGPT_INSTALL_LOCATION", &app.install_location)
         .args([
             "-NoLogo",
             "-NoProfile",
             "-NonInteractive",
+            "-WindowStyle",
+            "Hidden",
             "-ExecutionPolicy",
             "Bypass",
             "-Command",
