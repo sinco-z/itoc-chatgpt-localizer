@@ -58,6 +58,7 @@ pub fn wait_and_inject(port: u16) -> Result<(), String> {
     let mut connection_healthy = true;
     let mut next_target_check = Instant::now() + Duration::from_secs(2);
     let mut locale_report_finished = false;
+    let mut locale_reload_requested = false;
     let mut locale_report_deadline =
         is_primary_app_page(&first.url).then(|| Instant::now() + LOCALE_REPORT_TIMEOUT);
     let mut next_locale_check = Instant::now();
@@ -89,12 +90,24 @@ pub fn wait_and_inject(port: u16) -> Result<(), String> {
             next_locale_check = Instant::now() + LOCALE_REPORT_INTERVAL;
             match poll_locale_setting(&mut client) {
                 Ok(LocaleSettingStatus::Ready) => {
-                    println!("已确认应用语言设置：zh-CN。");
+                    println!("已确认 ChatGPT 界面完成中文初始化。");
                     #[cfg(windows)]
-                    crate::windows_app::append_log("locale setting confirmed: zh-CN");
+                    crate::windows_app::append_log("localized UI confirmed: zh-CN");
                     locale_report_finished = true;
                     locale_report_deadline = None;
                 }
+                Ok(LocaleSettingStatus::ReloadRequired) if !locale_reload_requested => {
+                    locale_reload_requested = true;
+                    #[cfg(windows)]
+                    crate::windows_app::append_log(
+                        "UI remained English; requesting one controlled page reload",
+                    );
+                    client
+                        .call("Page.reload", json!({ "ignoreCache": false }))
+                        .map_err(|error| format!("请求 ChatGPT 页面安全重建失败：{error}"))?;
+                    next_locale_check = Instant::now() + Duration::from_secs(1);
+                }
+                Ok(LocaleSettingStatus::ReloadRequired) => {}
                 Ok(LocaleSettingStatus::Failed(detail)) => {
                     eprintln!("语言设置未完成：{detail}。语音增强仍会继续运行。");
                     #[cfg(windows)]
@@ -390,6 +403,7 @@ fn verify_runtime_marker(client: &mut CdpClient) -> Result<(), String> {
 #[derive(Debug, PartialEq)]
 enum LocaleSettingStatus {
     Pending,
+    ReloadRequired,
     Ready,
     Failed(String),
 }
@@ -399,7 +413,8 @@ fn poll_locale_setting(client: &mut CdpClient) -> Result<LocaleSettingStatus, St
         bridgeAvailable: globalThis.__ITOC_ZH_PREVIEW__.bridgeAvailable,
         settingStatus: globalThis.__ITOC_ZH_PREVIEW__.settingStatus,
         settingError: globalThis.__ITOC_ZH_PREVIEW__.settingError,
-        patchedClients: globalThis.__ITOC_ZH_PREVIEW__.patchedClients
+        patchedClients: globalThis.__ITOC_ZH_PREVIEW__.patchedClients,
+        uiLocaleStatus: globalThis.__ITOC_ZH_PREVIEW__.uiLocaleStatus
     } : null)"#;
     let result = client.call(
         "Runtime.evaluate",
@@ -415,7 +430,8 @@ fn poll_locale_setting(client: &mut CdpClient) -> Result<LocaleSettingStatus, St
 
 fn parse_locale_setting_status(status: &Value) -> LocaleSettingStatus {
     match status.get("settingStatus").and_then(Value::as_str) {
-        Some("ready" | "updated") => LocaleSettingStatus::Ready,
+        Some("ready") => LocaleSettingStatus::Ready,
+        Some("reload-required") => LocaleSettingStatus::ReloadRequired,
         Some("bridge-unavailable") => {
             LocaleSettingStatus::Failed("正式页面未提供设置接口，无法写入应用语言设置".to_string())
         }
@@ -626,12 +642,11 @@ mod tests {
     }
 
     #[test]
-    fn injection_does_not_reload_when_locale_is_already_set() {
-        assert!(INJECTION_SCRIPT.contains("reloadOnceForLocaleHooks"));
-        assert!(INJECTION_SCRIPT.contains("let shouldReload = false"));
-        assert!(INJECTION_SCRIPT
-            .contains("shouldReload = sessionStorage.getItem(RELOAD_MARKER) === LOCALE"));
-        assert!(INJECTION_SCRIPT.contains("sessionStorage.removeItem(RELOAD_MARKER)"));
+    fn injection_verifies_rendered_locale_before_requesting_a_reload() {
+        assert!(INJECTION_SCRIPT.contains("renderedLocaleStatus"));
+        assert!(INJECTION_SCRIPT.contains("UI_MARKERS"));
+        assert!(INJECTION_SCRIPT.contains("state.settingStatus = \"reload-required\""));
+        assert!(!INJECTION_SCRIPT.contains("location.reload()"));
 
         let ready_branch = INJECTION_SCRIPT
             .split("if (current?.value === LOCALE)")
@@ -640,7 +655,7 @@ mod tests {
             .split("await callSettingApi")
             .next()
             .expect("ready locale branch should end before setting the locale");
-        assert!(!ready_branch.contains("reloadOnceForLocaleHooks()"));
+        assert!(ready_branch.contains("verifyRenderedLocale()"));
     }
 
     #[test]
@@ -673,13 +688,17 @@ mod tests {
     }
 
     #[test]
-    fn locale_monitor_accepts_updated_state_before_page_reload() {
+    fn locale_monitor_distinguishes_ui_readiness_from_reload_requests() {
         assert_eq!(
-            parse_locale_setting_status(&json!({ "settingStatus": "updated" })),
+            parse_locale_setting_status(&json!({ "settingStatus": "ready" })),
             LocaleSettingStatus::Ready
         );
         assert_eq!(
-            parse_locale_setting_status(&json!({ "settingStatus": "retrying" })),
+            parse_locale_setting_status(&json!({ "settingStatus": "reload-required" })),
+            LocaleSettingStatus::ReloadRequired
+        );
+        assert_eq!(
+            parse_locale_setting_status(&json!({ "settingStatus": "verifying-ui" })),
             LocaleSettingStatus::Pending
         );
     }

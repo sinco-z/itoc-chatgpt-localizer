@@ -1,10 +1,11 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.1.9-preview.6";
+  const VERSION = "0.1.9-preview.7";
   const LOCALE = "zh-CN";
   const I18N_CONFIG_ID = "72216192";
   const RELOAD_MARKER = "itoc.zh.locale.reload.v1";
+  const RELOAD_TOKEN = `${VERSION}:${LOCALE}`;
   const VOICE_BUTTON_ID = "itoc-voice-typing-button";
   const VOICE_BINDING = "__itocVoiceTyping";
 
@@ -19,6 +20,7 @@
     bridgeAvailable: false,
     settingStatus: "pending",
     settingError: null,
+    uiLocaleStatus: "pending",
     installedAt: new Date().toISOString(),
   };
   globalThis.__ITOC_ZH_PREVIEW__ = state;
@@ -101,15 +103,71 @@
       });
     });
 
-  const reloadOnceForLocaleHooks = () => {
-    let shouldReload = false;
-    try {
-      if (sessionStorage.getItem(RELOAD_MARKER) !== LOCALE) {
-        sessionStorage.setItem(RELOAD_MARKER, LOCALE);
-        shouldReload = sessionStorage.getItem(RELOAD_MARKER) === LOCALE;
+  const UI_MARKERS = {
+    zh: ["新建聊天", "新对话", "拉取请求", "计划任务", "定时任务", "插件", "项目", "最近"],
+    en: ["New chat", "Pull requests", "Scheduled", "Plugins", "Projects", "Recents"],
+  };
+
+  const countNavigationMarkers = (text, markers) => {
+    const lines = new Set(
+      String(text || "")
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean),
+    );
+    return markers.filter((marker) => lines.has(marker)).length;
+  };
+
+  const renderedLocaleStatus = () => {
+    const roots = Array.from(
+      document.querySelectorAll('nav, aside, [data-testid*="sidebar"], [class*="sidebar"]'),
+    ).filter((element) => {
+      const rect = element.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    });
+    const text = (roots.length ? roots.map((root) => root.innerText).join("\n") : document.body?.innerText)
+      ?.slice(0, 3000);
+    const zh = countNavigationMarkers(text, UI_MARKERS.zh);
+    const en = countNavigationMarkers(text, UI_MARKERS.en);
+    if (zh >= 2 && zh > en) return "localized";
+    if (en >= 2 && en > zh) return "english";
+    return "pending";
+  };
+
+  const verifyRenderedLocale = () => {
+    const startedAt = Date.now();
+    const check = () => {
+      const status = renderedLocaleStatus();
+      state.uiLocaleStatus = status;
+      if (status === "localized") {
+        state.settingStatus = "ready";
+        try {
+          sessionStorage.removeItem(RELOAD_MARKER);
+        } catch (_) {}
+        return;
       }
-    } catch (_) {}
-    if (shouldReload) setTimeout(() => location.reload(), 100);
+      if (status === "english") {
+        let alreadyReloaded = false;
+        try {
+          alreadyReloaded = sessionStorage.getItem(RELOAD_MARKER) === RELOAD_TOKEN;
+          if (!alreadyReloaded) sessionStorage.setItem(RELOAD_MARKER, RELOAD_TOKEN);
+        } catch (_) {}
+        if (alreadyReloaded) {
+          state.settingStatus = "failed";
+          state.settingError = "界面重建后仍显示英文，已停止再次重载";
+        } else {
+          state.settingStatus = "reload-required";
+        }
+        return;
+      }
+      if (Date.now() - startedAt >= 12000) {
+        state.settingStatus = "failed";
+        state.settingError = "语言设置已写入，但无法确认当前界面是否完成汉化";
+        return;
+      }
+      setTimeout(check, 250);
+    };
+    check();
   };
 
   const syncOfficialLocale = async () => {
@@ -122,10 +180,8 @@
     try {
       const current = await callSettingApi(bridge, "get-setting", { key: "localeOverride" });
       if (current?.value === LOCALE) {
-        state.settingStatus = "ready";
-        try {
-          sessionStorage.removeItem(RELOAD_MARKER);
-        } catch (_) {}
+        state.settingStatus = "verifying-ui";
+        verifyRenderedLocale();
         return;
       }
       await callSettingApi(bridge, "set-setting", { key: "localeOverride", value: LOCALE });
@@ -133,8 +189,8 @@
       if (verified?.value !== LOCALE) {
         throw new Error(`localeOverride was not persisted (received ${String(verified?.value)})`);
       }
-      state.settingStatus = "updated";
-      reloadOnceForLocaleHooks();
+      state.settingStatus = "verifying-ui";
+      verifyRenderedLocale();
     } catch (error) {
       state.settingStatus = "failed";
       state.settingError = String(error?.message || error);
