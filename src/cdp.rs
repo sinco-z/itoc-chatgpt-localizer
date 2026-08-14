@@ -563,6 +563,22 @@ mod tests {
     }
 
     #[test]
+    fn injection_reloads_once_when_locale_is_already_set() {
+        assert!(INJECTION_SCRIPT.contains("reloadOnceForLocaleHooks"));
+        assert!(INJECTION_SCRIPT.contains("sessionStorage.getItem(RELOAD_MARKER) === LOCALE"));
+        assert!(INJECTION_SCRIPT.contains("sessionStorage.removeItem(RELOAD_MARKER)"));
+
+        let ready_branch = INJECTION_SCRIPT
+            .split("if (current?.value === LOCALE)")
+            .nth(1)
+            .expect("ready locale branch should exist")
+            .split("await callSettingApi")
+            .next()
+            .expect("ready locale branch should end before setting the locale");
+        assert!(ready_branch.contains("reloadOnceForLocaleHooks()"));
+    }
+
+    #[test]
     fn injection_adds_a_voice_typing_button_without_using_chatgpt_voice_mode() {
         assert!(INJECTION_SCRIPT.contains("itoc-voice-typing-button"));
         assert!(INJECTION_SCRIPT.contains("Windows 语音输入（Win+H）"));
