@@ -10,6 +10,8 @@ use tungstenite::{connect, Message, WebSocket};
 
 const INJECTION_SCRIPT: &str = include_str!("injection.js");
 const VOICE_TYPING_BINDING: &str = "__itocVoiceTyping";
+const LOCALE_REPORT_TIMEOUT: Duration = Duration::from_secs(70);
+const LOCALE_REPORT_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -47,6 +49,10 @@ pub fn wait_and_inject(port: u16) -> Result<(), String> {
     let mut active_url = first.web_socket_debugger_url.clone().unwrap_or_default();
     let mut connection_healthy = true;
     let mut next_target_check = Instant::now() + Duration::from_secs(2);
+    let mut locale_report_finished = false;
+    let mut locale_report_deadline =
+        is_primary_app_page(&first.url).then(|| Instant::now() + LOCALE_REPORT_TIMEOUT);
+    let mut next_locale_check = Instant::now();
     let mut misses = 0_u8;
     loop {
         match client.next_event() {
@@ -63,6 +69,38 @@ pub fn wait_and_inject(port: u16) -> Result<(), String> {
             }
         }
 
+        if !locale_report_finished
+            && connection_healthy
+            && locale_report_deadline.is_some()
+            && Instant::now() >= next_locale_check
+        {
+            next_locale_check = Instant::now() + LOCALE_REPORT_INTERVAL;
+            match poll_locale_setting(&mut client) {
+                Ok(LocaleSettingStatus::Ready) => {
+                    println!("已确认应用语言设置：zh-CN。");
+                    locale_report_finished = true;
+                    locale_report_deadline = None;
+                }
+                Ok(LocaleSettingStatus::Failed(detail)) => {
+                    eprintln!("语言设置未完成：{detail}。语音增强仍会继续运行。");
+                    locale_report_finished = true;
+                    locale_report_deadline = None;
+                }
+                Ok(LocaleSettingStatus::Pending) => {
+                    if locale_report_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                        eprintln!("语言设置仍在后台初始化；启动器将继续运行，不影响语音增强。");
+                        locale_report_finished = true;
+                        locale_report_deadline = None;
+                    }
+                }
+                Err(_) => {
+                    // The locale change can reload the page. Let the regular target
+                    // watcher reconnect instead of treating that reload as a failure.
+                    connection_healthy = false;
+                }
+            }
+        }
+
         if Instant::now() < next_target_check {
             continue;
         }
@@ -75,6 +113,13 @@ pub fn wait_and_inject(port: u16) -> Result<(), String> {
                     client = inject_target(&target)?;
                     active_url = next_url;
                     connection_healthy = true;
+                    if !locale_report_finished
+                        && locale_report_deadline.is_none()
+                        && is_primary_app_page(&target.url)
+                    {
+                        locale_report_deadline = Some(Instant::now() + LOCALE_REPORT_TIMEOUT);
+                        next_locale_check = Instant::now();
+                    }
                     println!("检测到 ChatGPT 页面重建，已重新注入中文 Preview。");
                 }
             }
@@ -204,9 +249,6 @@ fn inject_target(target: &Target) -> Result<CdpClient, String> {
         }),
     )?;
     verify_runtime_marker(&mut client)?;
-    if is_primary_app_page(&target.url) {
-        report_locale_setting(&mut client)?;
-    }
     Ok(client)
 }
 
@@ -323,48 +365,47 @@ fn verify_runtime_marker(client: &mut CdpClient) -> Result<(), String> {
         .ok_or_else(|| "中文环境脚本没有在页面生效".to_string())
 }
 
-fn report_locale_setting(client: &mut CdpClient) -> Result<(), String> {
-    let deadline = Instant::now() + Duration::from_secs(15);
+#[derive(Debug, PartialEq)]
+enum LocaleSettingStatus {
+    Pending,
+    Ready,
+    Failed(String),
+}
+
+fn poll_locale_setting(client: &mut CdpClient) -> Result<LocaleSettingStatus, String> {
     let expression = r#"JSON.stringify(globalThis.__ITOC_ZH_PREVIEW__ ? {
         bridgeAvailable: globalThis.__ITOC_ZH_PREVIEW__.bridgeAvailable,
         settingStatus: globalThis.__ITOC_ZH_PREVIEW__.settingStatus,
         settingError: globalThis.__ITOC_ZH_PREVIEW__.settingError,
         patchedClients: globalThis.__ITOC_ZH_PREVIEW__.patchedClients
     } : null)"#;
+    let result = client.call(
+        "Runtime.evaluate",
+        json!({ "expression": expression, "returnByValue": true }),
+    )?;
+    let Some(serialized) = result.pointer("/result/value").and_then(Value::as_str) else {
+        return Ok(LocaleSettingStatus::Pending);
+    };
+    let status = serde_json::from_str::<Value>(serialized)
+        .map_err(|error| format!("无法解析语言设置状态：{error}"))?;
+    Ok(parse_locale_setting_status(&status))
+}
 
-    while Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(500));
-        let Ok(result) = client.call(
-            "Runtime.evaluate",
-            json!({ "expression": expression, "returnByValue": true }),
-        ) else {
-            continue;
-        };
-        let Some(serialized) = result.pointer("/result/value").and_then(Value::as_str) else {
-            continue;
-        };
-        let Ok(status) = serde_json::from_str::<Value>(serialized) else {
-            continue;
-        };
-        match status.get("settingStatus").and_then(Value::as_str) {
-            Some("ready") => {
-                println!("已确认应用语言设置：zh-CN。");
-                return Ok(());
-            }
-            Some("bridge-unavailable") => {
-                return Err("正式页面未提供设置接口，无法写入应用语言设置".to_string());
-            }
-            Some("failed") => {
-                let detail = status
-                    .get("settingError")
-                    .and_then(Value::as_str)
-                    .unwrap_or("未知错误");
-                return Err(format!("写入应用语言设置失败：{detail}"));
-            }
-            _ => {}
+fn parse_locale_setting_status(status: &Value) -> LocaleSettingStatus {
+    match status.get("settingStatus").and_then(Value::as_str) {
+        Some("ready" | "updated") => LocaleSettingStatus::Ready,
+        Some("bridge-unavailable") => {
+            LocaleSettingStatus::Failed("正式页面未提供设置接口，无法写入应用语言设置".to_string())
         }
+        Some("failed") => LocaleSettingStatus::Failed(
+            status
+                .get("settingError")
+                .and_then(Value::as_str)
+                .unwrap_or("未知错误")
+                .to_string(),
+        ),
+        _ => LocaleSettingStatus::Pending,
     }
-    Err("等待应用确认语言设置超时".to_string())
 }
 
 fn validate_websocket_url(url: &str, expected_port: u16) -> Result<(), String> {
@@ -611,6 +652,29 @@ mod tests {
             "method": "Runtime.bindingCalled",
             "params": { "name": VOICE_TYPING_BINDING, "payload": "unexpected" }
         })));
+    }
+
+    #[test]
+    fn locale_monitor_accepts_updated_state_before_page_reload() {
+        assert_eq!(
+            parse_locale_setting_status(&json!({ "settingStatus": "updated" })),
+            LocaleSettingStatus::Ready
+        );
+        assert_eq!(
+            parse_locale_setting_status(&json!({ "settingStatus": "retrying" })),
+            LocaleSettingStatus::Pending
+        );
+    }
+
+    #[test]
+    fn locale_monitor_preserves_failure_detail() {
+        assert_eq!(
+            parse_locale_setting_status(&json!({
+                "settingStatus": "failed",
+                "settingError": "settings bridge unavailable"
+            })),
+            LocaleSettingStatus::Failed("settings bridge unavailable".to_string())
+        );
     }
 
     #[test]
