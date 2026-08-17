@@ -636,6 +636,8 @@ mod tests {
     fn injection_uses_early_runtime_hooks_without_network_interception() {
         assert!(INJECTION_SCRIPT.contains("__STATSIG__"));
         assert!(INJECTION_SCRIPT.contains("getDynamicConfig"));
+        assert!(INJECTION_SCRIPT.contains("getLayer"));
+        assert!(INJECTION_SCRIPT.contains("patchAccessor"));
         assert!(INJECTION_SCRIPT.contains("enable_i18n"));
         assert!(!INJECTION_SCRIPT.contains("Fetch.enable"));
         assert!(!INJECTION_SCRIPT.contains("Fetch.fulfillRequest"));
@@ -645,6 +647,7 @@ mod tests {
     fn injection_verifies_rendered_locale_before_requesting_a_reload() {
         assert!(INJECTION_SCRIPT.contains("renderedLocaleStatus"));
         assert!(INJECTION_SCRIPT.contains("UI_MARKERS"));
+        assert!(INJECTION_SCRIPT.contains("requestReloadOrFail"));
         assert!(INJECTION_SCRIPT.contains("state.settingStatus = \"reload-required\""));
         assert!(!INJECTION_SCRIPT.contains("location.reload()"));
 
@@ -656,6 +659,19 @@ mod tests {
             .next()
             .expect("ready locale branch should end before setting the locale");
         assert!(ready_branch.contains("verifyRenderedLocale()"));
+    }
+
+    #[test]
+    fn injection_requests_one_reload_when_slow_ui_detection_times_out() {
+        let timeout_branch = INJECTION_SCRIPT
+            .split("Date.now() - startedAt >= 12000")
+            .nth(1)
+            .expect("rendered locale timeout branch should exist")
+            .split("setTimeout(check, 250)")
+            .next()
+            .expect("timeout branch should end before the next poll");
+        assert!(timeout_branch.contains("requestReloadOrFail"));
+        assert!(INJECTION_SCRIPT.contains("sessionStorage.getItem(RELOAD_MARKER) === RELOAD_TOKEN"));
     }
 
     #[test]

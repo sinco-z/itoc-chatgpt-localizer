@@ -104,7 +104,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "itoc-chatgpt-localizer"
-version = "0.1.9-preview.7"
+version = "0.1.9-preview.9"
 dependencies = [
  "serde",
  "serde_json",

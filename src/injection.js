@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.1.9-preview.7";
+  const VERSION = "0.1.9-preview.9";
   const LOCALE = "zh-CN";
   const I18N_CONFIG_ID = "72216192";
   const RELOAD_MARKER = "itoc.zh.locale.reload.v1";
@@ -136,6 +136,19 @@
 
   const verifyRenderedLocale = () => {
     const startedAt = Date.now();
+    const requestReloadOrFail = (failureMessage) => {
+      let alreadyReloaded = false;
+      try {
+        alreadyReloaded = sessionStorage.getItem(RELOAD_MARKER) === RELOAD_TOKEN;
+        if (!alreadyReloaded) sessionStorage.setItem(RELOAD_MARKER, RELOAD_TOKEN);
+      } catch (_) {}
+      if (alreadyReloaded) {
+        state.settingStatus = "failed";
+        state.settingError = failureMessage;
+      } else {
+        state.settingStatus = "reload-required";
+      }
+    };
     const check = () => {
       const status = renderedLocaleStatus();
       state.uiLocaleStatus = status;
@@ -147,22 +160,11 @@
         return;
       }
       if (status === "english") {
-        let alreadyReloaded = false;
-        try {
-          alreadyReloaded = sessionStorage.getItem(RELOAD_MARKER) === RELOAD_TOKEN;
-          if (!alreadyReloaded) sessionStorage.setItem(RELOAD_MARKER, RELOAD_TOKEN);
-        } catch (_) {}
-        if (alreadyReloaded) {
-          state.settingStatus = "failed";
-          state.settingError = "界面重建后仍显示英文，已停止再次重载";
-        } else {
-          state.settingStatus = "reload-required";
-        }
+        requestReloadOrFail("界面重建后仍显示英文，已停止再次重载");
         return;
       }
       if (Date.now() - startedAt >= 12000) {
-        state.settingStatus = "failed";
-        state.settingError = "语言设置已写入，但无法确认当前界面是否完成汉化";
+        requestReloadOrFail("界面重建后仍无法确认中文初始化，已停止再次重载");
         return;
       }
       setTimeout(check, 250);
@@ -281,20 +283,34 @@
   };
 
   const patchClient = (client) => {
-    if (!client || typeof client !== "object" || typeof client.getDynamicConfig !== "function") {
+    if (
+      !client ||
+      typeof client !== "object" ||
+      (typeof client.getDynamicConfig !== "function" && typeof client.getLayer !== "function")
+    ) {
       return false;
     }
     if (client.__itocZhClientPatched === VERSION) return true;
 
-    const originalGetDynamicConfig = client.getDynamicConfig.bind(client);
-    client.getDynamicConfig = (name, options) => {
-      const result = originalGetDynamicConfig(name, options);
-      return String(name) === I18N_CONFIG_ID ? enableI18n(result) : result;
+    const patchAccessor = (methodName) => {
+      if (typeof client[methodName] !== "function") return;
+      const marker = `__itocZh_${methodName}_patched`;
+      if (client[marker] === VERSION) return;
+
+      const original = client[methodName].bind(client);
+      client[methodName] = (name, options) => {
+        const result = original(name, options);
+        return String(name) === I18N_CONFIG_ID ? enableI18n(result) : result;
+      };
+      client[marker] = VERSION;
+      try {
+        enableI18n(client[methodName](I18N_CONFIG_ID, { disableExposureLog: true }));
+      } catch (_) {}
     };
+
+    patchAccessor("getDynamicConfig");
+    patchAccessor("getLayer");
     client.__itocZhClientPatched = VERSION;
-    try {
-      enableI18n(client.getDynamicConfig(I18N_CONFIG_ID, { disableExposureLog: true }));
-    } catch (_) {}
     state.patchedClients += 1;
     return true;
   };
