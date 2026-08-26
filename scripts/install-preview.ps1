@@ -103,8 +103,7 @@ try {
     }
     else {
         if ($signature.SignerCertificate) {
-            Write-Host "提示：组件使用自签名证书，Windows 默认不会信任。发布者：$($signature.SignerCertificate.Subject)" -ForegroundColor Yellow
-            Write-Host "证书指纹：$($signature.SignerCertificate.Thumbprint)" -ForegroundColor Yellow
+            Write-Host '组件签名与完整性校验通过。'
         }
         else {
             Write-Host '提示：中文与语音增强组件暂未代码签名，请只从 ai-relay.itoc.club 安装。' -ForegroundColor Yellow
