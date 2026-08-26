@@ -39,9 +39,28 @@ cargo run
 irm https://ai-relay.itoc.club/install/chatgpt-zh.ps1 | iex
 ```
 
-由于 Preview 暂未签名，安装器会展示一条简短提示，但不要求输入确认短语。快捷方式
-直接引用本机官方应用内置的多分辨率图标，不复制或重新分发官方图标；卸载只删除
-ITOC 启动器和快捷方式，不会删除 ChatGPT、`~/.codex` 或聊天历史。
+安装器会把官方应用随包提供的 ChatGPT 图标复制到 ITOC 的稳定安装目录，再让桌面和
+开始菜单快捷方式引用该副本。Microsoft Store 更新官方应用后，快捷方式不会再因为旧的
+版本化 `WindowsApps` 路径被删除而丢失图标。
+
+## Windows 代码签名
+
+Windows 11 智能应用控制可能直接阻止未知的未签名程序。标签版发布因此必须具有可信的
+RSA Authenticode 签名和时间戳；普通分支构建仍可保留为未签名的开发测试产物。
+
+发布前在 GitHub Actions 中配置以下仓库 Secret：
+
+- `WINDOWS_SIGNING_CERTIFICATE_BASE64`：可信代码签名证书 PFX 文件的 Base64 内容；
+- `WINDOWS_SIGNING_CERTIFICATE_PASSWORD`：该 PFX 的密码。
+
+可选仓库变量 `WINDOWS_TIMESTAMP_URL` 用于覆盖默认 RFC 3161 时间戳地址。签名发生在
+生成 `SHA256SUMS.txt` 之前；如果标签构建缺少有效的可信 RSA 签名或时间戳，工作流会停止，
+不会继续创建一个会被智能应用控制拦截的 Release。
+
+已经发布的旧 Preview 可能仍未签名；如果 Windows 智能应用控制已开启，安装器会停止安装
+并提示等待可信签名版本。快捷方式使用安装时从本机官方应用复制到 ITOC 目录的图标，该图标
+不会包含在 Release 中或对外重新分发；卸载只删除 ITOC 启动器、图标和快捷方式，不会删除
+ChatGPT、`~/.codex` 或聊天历史。
 
 ## 兼容性策略
 

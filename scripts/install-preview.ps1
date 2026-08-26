@@ -7,6 +7,7 @@ $ErrorActionPreference = 'Stop'
 $AssetName = 'itoc-chatgpt-zh-windows-x64.exe'
 $InstallRoot = Join-Path $env:LOCALAPPDATA 'ITOC\ChatGPTZhPreview'
 $ExecutablePath = Join-Path $InstallRoot 'itoc-chatgpt-zh.exe'
+$IconPath = Join-Path $InstallRoot 'chatgpt.ico'
 
 function Write-Utf8NoBom([string]$Path, [string]$Content) {
     $utf8 = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList $false
@@ -24,6 +25,45 @@ function Assert-Sha256([string]$Path, [string]$Name, [string]$ChecksumsPath) {
     $actualHash = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
     if ($actualHash -cne $expectedHash) {
         throw "$Name 的 SHA-256 校验失败，已拒绝安装。"
+    }
+}
+
+function Install-StableOfficialIcon([string]$OfficialExecutable, [string]$Destination) {
+    $temporaryIcon = "$Destination.tmp"
+    Remove-Item -LiteralPath $temporaryIcon -Force -ErrorAction SilentlyContinue
+    try {
+        $packagedIcon = Join-Path (Split-Path -Parent $OfficialExecutable) 'resources\icon-chatgpt.ico'
+        if (Test-Path -LiteralPath $packagedIcon -PathType Leaf) {
+            Copy-Item -LiteralPath $packagedIcon -Destination $temporaryIcon -Force
+        }
+        else {
+            Add-Type -AssemblyName System.Drawing
+            $icon = [System.Drawing.Icon]::ExtractAssociatedIcon($OfficialExecutable)
+            if (-not $icon) {
+                throw '无法从官方程序提取图标。'
+            }
+            try {
+                $stream = [IO.File]::Create($temporaryIcon)
+                try {
+                    $icon.Save($stream)
+                }
+                finally {
+                    $stream.Dispose()
+                }
+            }
+            finally {
+                $icon.Dispose()
+            }
+        }
+        Move-Item -LiteralPath $temporaryIcon -Destination $Destination -Force
+        return $true
+    }
+    catch {
+        Write-Warning "无法保存稳定的 ChatGPT 图标，将使用启动器默认图标：$($_.Exception.Message)"
+        return $false
+    }
+    finally {
+        Remove-Item -LiteralPath $temporaryIcon -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -45,8 +85,6 @@ $officialExecutable = Join-Path $officialPackage.InstallLocation $officialApp.Ex
 if (-not (Test-Path -LiteralPath $officialExecutable -PathType Leaf)) {
     throw '已检测到 ChatGPT 应用包，但无法定位官方程序文件。请修复或重新安装官方应用。'
 }
-$officialIconSource = "$officialExecutable,0"
-
 $releaseUrl = "https://ai-relay.itoc.club/install/releases/$Version"
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) "itoc-chatgpt-zh-$([Guid]::NewGuid().ToString('N'))"
 $temporaryExe = Join-Path $temporaryRoot $AssetName
@@ -64,11 +102,20 @@ try {
         Write-Host "数字签名有效：$($signature.SignerCertificate.Subject)"
     }
     else {
+        $smartAppControlState = (Get-ItemProperty `
+            -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy' `
+            -Name 'VerifiedAndReputablePolicyState' `
+            -ErrorAction SilentlyContinue).VerifiedAndReputablePolicyState
+        if ($smartAppControlState -eq 1) {
+            throw 'Windows 智能应用控制已开启，但此版本没有有效的可信代码签名。为避免安装后被系统阻止，本次安装已停止。请等待已签名版本。'
+        }
         Write-Host '提示：中文与语音增强组件暂未代码签名，请只从 ai-relay.itoc.club 安装。' -ForegroundColor Yellow
     }
 
     New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
     Copy-Item -LiteralPath $temporaryExe -Destination $ExecutablePath -Force
+    $hasStableIcon = Install-StableOfficialIcon -OfficialExecutable $officialExecutable -Destination $IconPath
+    $shortcutIconSource = if ($hasStableIcon) { "$IconPath,0" } else { "$ExecutablePath,0" }
 
     $shell = New-Object -ComObject WScript.Shell
     $desktopShortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) 'ChatGPT 中文版.lnk'
@@ -85,7 +132,7 @@ try {
         $shortcut.TargetPath = $ExecutablePath
         $shortcut.WorkingDirectory = $InstallRoot
         $shortcut.Description = '以中文界面和语音输入启动官方 ChatGPT'
-        $shortcut.IconLocation = $officialIconSource
+        $shortcut.IconLocation = $shortcutIconSource
         $shortcut.Save()
     }
 

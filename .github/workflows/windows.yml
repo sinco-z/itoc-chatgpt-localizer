@@ -48,6 +48,78 @@ jobs:
       - name: Build release executable
         run: cargo build --release --locked
 
+      - name: Sign release executable
+        shell: pwsh
+        env:
+          SIGNING_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_BASE64 }}
+          SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_PASSWORD }}
+          TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL || 'http://timestamp.digicert.com' }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:SIGNING_CERTIFICATE_BASE64)) {
+            Write-Host 'No Windows signing certificate is configured; leaving this development build unsigned.'
+            exit 0
+          }
+          if ([string]::IsNullOrWhiteSpace($env:SIGNING_CERTIFICATE_PASSWORD)) {
+            throw 'WINDOWS_SIGNING_CERTIFICATE_PASSWORD is required when a signing certificate is configured.'
+          }
+
+          $pfxPath = Join-Path $env:RUNNER_TEMP 'itoc-windows-signing.pfx'
+          $importedCertificates = @()
+          try {
+            [IO.File]::WriteAllBytes(
+              $pfxPath,
+              [Convert]::FromBase64String($env:SIGNING_CERTIFICATE_BASE64)
+            )
+            $password = ConvertTo-SecureString $env:SIGNING_CERTIFICATE_PASSWORD -AsPlainText -Force
+            $importedCertificates = @(Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation 'Cert:\CurrentUser\My' -Password $password -Exportable)
+            $signingCertificate = $importedCertificates |
+              Where-Object HasPrivateKey |
+              Select-Object -First 1
+            if (-not $signingCertificate) {
+              throw 'The configured PFX does not contain a certificate with a private key.'
+            }
+
+            $signTool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter 'signtool.exe' |
+              Where-Object FullName -Match '\\x64\\signtool\.exe$' |
+              Sort-Object FullName -Descending |
+              Select-Object -First 1
+            if (-not $signTool) {
+              throw 'signtool.exe was not found on the Windows runner.'
+            }
+
+            & $signTool.FullName sign /sha1 $signingCertificate.Thumbprint /s My /fd SHA256 /tr $env:TIMESTAMP_URL /td SHA256 'target/release/itoc-chatgpt-zh.exe'
+            if ($LASTEXITCODE -ne 0) {
+              throw "signtool failed with exit code $LASTEXITCODE."
+            }
+          }
+          finally {
+            foreach ($certificate in $importedCertificates) {
+              Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($certificate.Thumbprint)" -Force -ErrorAction SilentlyContinue
+            }
+            Remove-Item -LiteralPath $pfxPath -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Verify release signature
+        shell: pwsh
+        run: |
+          $signature = Get-AuthenticodeSignature 'target/release/itoc-chatgpt-zh.exe'
+          Write-Host "Signature status: $($signature.Status)"
+          if ($signature.SignerCertificate) {
+            Write-Host "Publisher: $($signature.SignerCertificate.Subject)"
+          }
+
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            if ($signature.Status -ne 'Valid') {
+              throw 'Tagged releases must carry a valid trusted Authenticode signature.'
+            }
+            if ($signature.SignerCertificate.PublicKey.Oid.Value -ne '1.2.840.113549.1.1.1') {
+              throw 'Smart App Control requires an RSA code-signing certificate.'
+            }
+            if (-not $signature.TimeStamperCertificate) {
+              throw 'Tagged releases must include a trusted timestamp.'
+            }
+          }
+
       - name: Prepare artifact
         shell: pwsh
         run: |
