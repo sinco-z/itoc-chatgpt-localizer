@@ -102,13 +102,6 @@ try {
         Write-Host "数字签名有效：$($signature.SignerCertificate.Subject)"
     }
     else {
-        $smartAppControlState = (Get-ItemProperty `
-            -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy' `
-            -Name 'VerifiedAndReputablePolicyState' `
-            -ErrorAction SilentlyContinue).VerifiedAndReputablePolicyState
-        if ($smartAppControlState -eq 1) {
-            throw 'Windows 智能应用控制已开启，但此版本没有有效的可信代码签名。为避免安装后被系统阻止，本次安装已停止。请等待已签名版本。'
-        }
         if ($signature.SignerCertificate) {
             Write-Host "提示：组件使用自签名证书，Windows 默认不会信任。发布者：$($signature.SignerCertificate.Subject)" -ForegroundColor Yellow
             Write-Host "证书指纹：$($signature.SignerCertificate.Thumbprint)" -ForegroundColor Yellow
