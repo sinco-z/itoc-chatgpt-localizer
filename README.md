@@ -4,7 +4,7 @@
 Windows 应用包身份启动官方应用，并在仅监听本机回环地址的临时调试端口上，
 为页面注册早期运行时脚本，尝试启用官方已经提供的中文资源。
 
-当前状态：**Preview，尚未完成真实 Windows 兼容性验证，也没有代码签名。**
+当前状态：**Preview，正在真实 Windows 环境中验证；发布包使用固定的 RSA 自签名证书和可信时间戳。**
 
 ## 安全边界
 
@@ -45,20 +45,27 @@ irm https://ai-relay.itoc.club/install/chatgpt-zh.ps1 | iex
 
 ## Windows 代码签名
 
-Windows 11 智能应用控制可能直接阻止未知的未签名程序。标签版发布因此必须具有可信的
-RSA Authenticode 签名和时间戳；普通分支构建仍可保留为未签名的开发测试产物。
+Windows 11 智能应用控制可能直接阻止未知或自签名程序。当前标签版发布必须具有固定的
+RSA Authenticode 自签名证书和时间戳；普通分支在没有配置证书时仍可生成未签名开发产物。
+自签名用于验证二进制在发布后没有被修改，不代表微软或其他公共证书机构信任该发布者。
+
+当前发布证书：
+
+- Subject：`CN=ITOC Localizer Self-Signed Preview`
+- SHA-256 指纹：`A5:6A:3F:32:0B:75:B5:A8:CA:3A:E9:92:2A:82:CC:C2:10:F4:93:38:01:B3:C5:E7:26:32:6B:98:04:F9:C5:7A`
+- 有效期：2026-08-26 至 2029-08-25；带有效时间戳的既有发布包不会因证书到期而失去签名时间证明。
 
 发布前在 GitHub Actions 中配置以下仓库 Secret：
 
-- `WINDOWS_SIGNING_CERTIFICATE_BASE64`：可信代码签名证书 PFX 文件的 Base64 内容；
+- `WINDOWS_SIGNING_CERTIFICATE_BASE64`：固定代码签名证书 PFX 文件的 Base64 内容；
 - `WINDOWS_SIGNING_CERTIFICATE_PASSWORD`：该 PFX 的密码。
 
 可选仓库变量 `WINDOWS_TIMESTAMP_URL` 用于覆盖默认 RFC 3161 时间戳地址。签名发生在
-生成 `SHA256SUMS.txt` 之前；如果标签构建缺少有效的可信 RSA 签名或时间戳，工作流会停止，
-不会继续创建一个会被智能应用控制拦截的 Release。
+生成 `SHA256SUMS.txt` 之前；如果标签构建缺少预期 RSA 签名或时间戳，工作流会停止。
 
-已经发布的旧 Preview 可能仍未签名；如果 Windows 智能应用控制已开启，安装器会停止安装
-并提示等待可信签名版本。快捷方式使用安装时从本机官方应用复制到 ITOC 目录的图标，该图标
+已经发布的旧 Preview 可能仍未签名；自签名版本仍不受 Windows 默认信任。如果 Windows
+智能应用控制已开启，安装器会停止安装并提示等待公共可信签名版本。快捷方式使用安装时从
+本机官方应用复制到 ITOC 目录的图标，该图标
 不会包含在 Release 中或对外重新分发；卸载只删除 ITOC 启动器、图标和快捷方式，不会删除
 ChatGPT、`~/.codex` 或聊天历史。
 

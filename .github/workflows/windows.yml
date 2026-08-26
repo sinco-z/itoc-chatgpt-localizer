@@ -78,6 +78,7 @@ jobs:
             if (-not $signingCertificate) {
               throw 'The configured PFX does not contain a certificate with a private key.'
             }
+            "SIGNING_CERTIFICATE_THUMBPRINT=$($signingCertificate.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
             $signTool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter 'signtool.exe' |
               Where-Object FullName -Match '\\x64\\signtool\.exe$' |
@@ -109,14 +110,26 @@ jobs:
           }
 
           if ($env:GITHUB_REF -like 'refs/tags/v*') {
-            if ($signature.Status -ne 'Valid') {
-              throw 'Tagged releases must carry a valid trusted Authenticode signature.'
+            if (-not $signature.SignerCertificate) {
+              throw 'Tagged releases must carry an Authenticode signature.'
+            }
+            if ([string]::IsNullOrWhiteSpace($env:SIGNING_CERTIFICATE_THUMBPRINT)) {
+              throw 'The signing certificate thumbprint was not recorded.'
+            }
+            if ($signature.SignerCertificate.Thumbprint -ne $env:SIGNING_CERTIFICATE_THUMBPRINT) {
+              throw 'The release signer does not match the certificate imported for this build.'
+            }
+            if ($signature.Status -in @('HashMismatch', 'NotSigned', 'NotSupported')) {
+              throw "The Authenticode signature is unusable: $($signature.Status)."
             }
             if ($signature.SignerCertificate.PublicKey.Oid.Value -ne '1.2.840.113549.1.1.1') {
-              throw 'Smart App Control requires an RSA code-signing certificate.'
+              throw 'Tagged releases require an RSA code-signing certificate.'
             }
             if (-not $signature.TimeStamperCertificate) {
-              throw 'Tagged releases must include a trusted timestamp.'
+              throw 'Tagged releases must include a timestamp.'
+            }
+            if ($signature.Status -ne 'Valid') {
+              Write-Warning 'This release is self-signed. Windows will not trust it unless the user explicitly trusts the certificate.'
             }
           }
 

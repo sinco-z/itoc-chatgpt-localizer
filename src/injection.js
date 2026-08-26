@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.1.9-preview.9";
+  const VERSION = "0.1.9-preview.10";
   const LOCALE = "zh-CN";
   const I18N_CONFIG_ID = "72216192";
   const RELOAD_MARKER = "itoc.zh.locale.reload.v1";

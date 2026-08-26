@@ -1,6 +1,6 @@
 ﻿[CmdletBinding()]
 param(
-    [string]$Version = 'v0.1.9-preview.9'
+    [string]$Version = 'v0.1.9-preview.10'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -109,7 +109,13 @@ try {
         if ($smartAppControlState -eq 1) {
             throw 'Windows 智能应用控制已开启，但此版本没有有效的可信代码签名。为避免安装后被系统阻止，本次安装已停止。请等待已签名版本。'
         }
-        Write-Host '提示：中文与语音增强组件暂未代码签名，请只从 ai-relay.itoc.club 安装。' -ForegroundColor Yellow
+        if ($signature.SignerCertificate) {
+            Write-Host "提示：组件使用自签名证书，Windows 默认不会信任。发布者：$($signature.SignerCertificate.Subject)" -ForegroundColor Yellow
+            Write-Host "证书指纹：$($signature.SignerCertificate.Thumbprint)" -ForegroundColor Yellow
+        }
+        else {
+            Write-Host '提示：中文与语音增强组件暂未代码签名，请只从 ai-relay.itoc.club 安装。' -ForegroundColor Yellow
+        }
     }
 
     New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
