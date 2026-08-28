@@ -85,7 +85,7 @@ $officialExecutable = Join-Path $officialPackage.InstallLocation $officialApp.Ex
 if (-not (Test-Path -LiteralPath $officialExecutable -PathType Leaf)) {
     throw '已检测到 ChatGPT 应用包，但无法定位官方程序文件。请修复或重新安装官方应用。'
 }
-$releaseUrl = "https://ai-relay.itoc.club/install/releases/$Version"
+$releaseUrl = "https://aichengfa.com/install/releases/$Version"
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) "itoc-chatgpt-zh-$([Guid]::NewGuid().ToString('N'))"
 $temporaryExe = Join-Path $temporaryRoot $AssetName
 $temporaryChecksums = Join-Path $temporaryRoot 'SHA256SUMS.txt'
@@ -106,7 +106,7 @@ try {
             Write-Host '组件签名与完整性校验通过。'
         }
         else {
-            Write-Host '提示：中文与语音增强组件暂未代码签名，请只从 ai-relay.itoc.club 安装。' -ForegroundColor Yellow
+            Write-Host '提示：中文与语音增强组件暂未代码签名，请只从 aichengfa.com 安装。' -ForegroundColor Yellow
         }
     }
 

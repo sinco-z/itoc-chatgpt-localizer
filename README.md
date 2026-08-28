@@ -36,7 +36,7 @@ cargo run
 正式 Preview Release 发布后，可以在普通 PowerShell（无需管理员权限）中运行：
 
 ```powershell
-irm https://ai-relay.itoc.club/install/chatgpt-zh.ps1 | iex
+irm https://aichengfa.com/install/chatgpt-zh.ps1 | iex
 ```
 
 安装器会把官方应用随包提供的 ChatGPT 图标复制到 ITOC 的稳定安装目录，再让桌面和
