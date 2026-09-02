@@ -686,6 +686,9 @@ mod tests {
     fn injection_adds_a_voice_typing_button_without_using_chatgpt_voice_mode() {
         assert!(INJECTION_SCRIPT.contains("itoc-voice-typing-button"));
         assert!(INJECTION_SCRIPT.contains("Windows 语音输入（Win+H）"));
+        assert!(INJECTION_SCRIPT.contains("[data-codex-composer]"));
+        assert!(INJECTION_SCRIPT.contains("data-composer-footer-layout"));
+        assert!(INJECTION_SCRIPT.contains("/send|"));
         assert!(INJECTION_SCRIPT.contains(VOICE_TYPING_BINDING));
         assert!(!INJECTION_SCRIPT.contains("navigator.mediaDevices"));
     }

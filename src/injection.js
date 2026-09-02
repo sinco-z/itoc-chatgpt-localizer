@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.1.9-preview.10";
+  const VERSION = "0.1.9-preview.11";
   const LOCALE = "zh-CN";
   const I18N_CONFIG_ID = "72216192";
   const RELOAD_MARKER = "itoc.zh.locale.reload.v1";
@@ -217,27 +217,34 @@
   };
 
   const voiceTypingButtonHost = () => {
-    const composer = document.querySelector('[data-codex-composer="true"]');
-    const footer = composer?.closest("[data-composer-footer-responsive]");
-    if (!footer) return null;
-    const footerRect = footer.getBoundingClientRect();
-    const buttons = Array.from(footer.querySelectorAll("button"))
+    const composer = document.querySelector("[data-codex-composer]");
+    if (!composer) return null;
+    const scopes = [
+      composer.closest("[data-composer-footer-responsive], [data-composer-footer-layout]"),
+      composer.closest("[data-codex-composer-root]"),
+      composer.parentElement,
+    ].filter((candidate, index, all) => candidate && all.indexOf(candidate) === index);
+    const isVisibleButton = (button) => {
+      const rect = button.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    };
+    const scope =
+      scopes.find((candidate) => Array.from(candidate.querySelectorAll("button")).some(isVisibleButton)) ??
+      scopes[0];
+    if (!scope) return null;
+    const buttons = Array.from(scope.querySelectorAll("button"))
       .filter((button) => button.id !== VOICE_BUTTON_ID)
-      .filter((button) => {
-        const rect = button.getBoundingClientRect();
-        return (
-          rect.width > 0 &&
-          rect.height > 0 &&
-          rect.top >= footerRect.top &&
-          rect.bottom <= footerRect.bottom + 1
-        );
-      })
+      .filter(isVisibleButton)
       .sort((left, right) => {
         const a = left.getBoundingClientRect();
         const b = right.getBoundingClientRect();
         return a.right - b.right;
       });
-    const sendButton = buttons.at(-1);
+    const sendButton =
+      buttons.find((button) => {
+        const label = `${button.getAttribute("aria-label") || ""} ${button.getAttribute("title") || ""}`;
+        return /send|发送|提交/i.test(label);
+      }) ?? buttons.at(-1);
     return sendButton?.parentElement ? { sendButton, host: sendButton.parentElement } : null;
   };
 
